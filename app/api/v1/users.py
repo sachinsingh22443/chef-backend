@@ -47,3 +47,6 @@ def get_profile(
         "avg_rating": round(avg_rating, 1),
         "join_date": current_user.created_at
     }
+    
+    
+    

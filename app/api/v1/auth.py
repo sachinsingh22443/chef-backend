@@ -27,6 +27,11 @@ import uuid
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
+import cloudinary.uploader
+
+
+
 @router.post("/signup")
 async def signup(
     name: str = Form(...),
@@ -40,7 +45,7 @@ async def signup(
     account_holder_name: str = Form(...),
     account_number: str = Form(...),
     ifsc_code: str = Form(...),
-    
+
     bio: str = Form(...),
     location: str = Form(...),
     specialties: str = Form(...),
@@ -50,25 +55,27 @@ async def signup(
 
     db: Session = Depends(get_db)
 ):
+    # 🔍 Check existing user
     existing_user = db.query(User).filter(User.email == email).first()
     if existing_user:
         raise HTTPException(400, "Email already registered")
 
     try:
-        # 🔥 UNIQUE FILE NAMES
-        profile_filename = f"{uuid.uuid4()}_{profile_image.filename}"
-        profile_path = f"uploads/{profile_filename}"
+        # 🔥 Upload profile image to Cloudinary
+        profile_result = cloudinary.uploader.upload(
+            profile_image.file,
+            folder="chef_profiles"
+        )
+        profile_url = profile_result["secure_url"]
 
-        with open(profile_path, "wb") as f:
-            f.write(await profile_image.read())
+        # 🔥 Upload FSSAI document to Cloudinary
+        fssai_result = cloudinary.uploader.upload(
+            fssai_document.file,
+            folder="fssai_docs"
+        )
+        fssai_url = fssai_result["secure_url"]
 
-        fssai_filename = f"{uuid.uuid4()}_{fssai_document.filename}"
-        fssai_path = f"uploads/{fssai_filename}"
-
-        with open(fssai_path, "wb") as f:
-            f.write(await fssai_document.read())
-
-        # 🔹 CREATE USER
+        # 🔹 Create User
         new_user = User(
             name=name,
             email=email,
@@ -78,15 +85,15 @@ async def signup(
             application_status="under_review"
         )
         db.add(new_user)
-        db.flush()  # ID mil jayega
+        db.flush()  # ID generate
 
-        # 🔹 CREATE CHEF PROFILE
+        # 🔹 Create Chef Profile
         chef = ChefProfile(
             user_id=new_user.id,
             address=address,
             fssai_number=fssai_number,
-            profile_image=profile_path,   # ✅ FIXED
-            fssai_document=fssai_path,    # ✅ FIXED
+            profile_image=profile_url,   # ✅ CLOUDINARY URL
+            fssai_document=fssai_url,    # ✅ CLOUDINARY URL
             account_holder_name=account_holder_name,
             account_number=account_number,
             ifsc_code=ifsc_code,
@@ -170,6 +177,9 @@ def reject_user(user_id: str, reason: str, db: Session = Depends(get_db)):
 
 
 
+from fastapi import HTTPException, UploadFile, File, Form
+import cloudinary.uploader
+
 @router.put("/users/update-profile")
 async def update_profile(
     name: str = Form(None),
@@ -195,7 +205,7 @@ async def update_profile(
         chef = current_user.chef_profile
 
         if not chef:
-            raise HTTPException(404, "Chef profile not found")
+            raise HTTPException(status_code=404, detail="Chef profile not found")
 
         if bio:
             chef.bio = bio
@@ -204,26 +214,29 @@ async def update_profile(
         if specialties:
             chef.specialties = specialties
 
-        # 🔹 Image update
+        # 🔥 CLOUDINARY IMAGE UPDATE
         if profile_image:
-            file_path = os.path.join(UPLOAD_DIR, profile_image.filename)
-            with open(file_path, "wb") as f:
-                f.write(await profile_image.read())
+            result = cloudinary.uploader.upload(
+                profile_image.file,
+                folder="chef_profiles"
+            )
 
-            chef.profile_image = file_path
+            image_url = result["secure_url"]
+
+            chef.profile_image = image_url   # ✅ SAVE URL
 
         db.commit()
         db.refresh(current_user)
         db.refresh(chef)
 
-        return {"msg": "Profile updated successfully"}
+        return {
+            "msg": "Profile updated successfully",
+            "profile_image": chef.profile_image
+        }
 
     except Exception as e:
         db.rollback()
-        raise HTTPException(500, str(e))
-    
-    
-
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # 👈 tumhara file

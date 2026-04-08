@@ -1,50 +1,50 @@
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.session import engine
 from app.db.base import Base
 
-# models
+# 🔹 Models (important for table creation)
 from app.models import user, menu, order, order_item
 
-# routers
+# 🔹 Routers
 from app.api.v1 import auth, users, menu as menu_api
 from app.api.v1 import dashboard, review, tomorrow_special, notification, subscription, orders
 
 import os
 from dotenv import load_dotenv
 
-# 🔥 FIX: सही तरीके से env load करो
+# 🔥 ENV LOAD
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env_path = os.path.join(BASE_DIR, ".env")
 load_dotenv(env_path)
 
-app = FastAPI()
+# 🔥 CLOUDINARY LOAD (VERY IMPORTANT)
+import app.core.cloudinary_config
 
-# 🔥 CORS (production में domain डालना)
+# 🔥 APP INIT
+app = FastAPI(title="Chef Backend API 🚀")
+
+
+# 🔥 CORS CONFIG
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # बाद में बदलना
+    allow_origins=["*"],   # 👉 production me specific domain dalna
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 🔥 uploads folder safe बनाओ
-if not os.path.exists("uploads"):
-    os.makedirs("uploads")
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
-# 🔥 DB create
+# 🔥 DATABASE INIT
 try:
     Base.metadata.create_all(bind=engine)
-    print("DB Connected ✅")
+    print("✅ Database Connected")
 except Exception as e:
-    print("DB Error ❌", e)
+    print("❌ Database Error:", e)
 
-# 🔥 ROUTES
+
+# 🔥 ROUTES REGISTER
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(menu_api.router, prefix="/menu", tags=["Menu"])
@@ -56,7 +56,11 @@ app.include_router(tomorrow_special.router)
 app.include_router(dashboard.router)
 app.include_router(review.router)
 
-# 🔥 root
+
+# 🔥 ROOT
 @app.get("/")
 def home():
-    return {"msg": "Chef Backend Running 🚀"}
+    return {
+        "status": "success",
+        "message": "Chef Backend Running 🚀"
+    }
