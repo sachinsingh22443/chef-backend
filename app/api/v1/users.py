@@ -40,7 +40,7 @@ def get_profile(
         "bio": chef.bio if chef else None,
         "location": chef.location if chef else None,
         "specialties": chef.specialties if chef else None,
-        "profile_image": f"http://localhost:9009/{chef.profile_image}" if chef and chef.profile_image else None,
+        "profile_image": f"https://chef-backend-1.onrender.com/{chef.profile_image}" if chef and chef.profile_image else None,
 
         # 🔥 NEW FIELDS
         "total_orders": total_orders,
