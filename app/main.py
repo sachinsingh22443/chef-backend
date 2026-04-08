@@ -38,7 +38,11 @@ if not os.path.exists("uploads"):
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # 🔥 DB create
-Base.metadata.create_all(bind=engine)
+try:
+    Base.metadata.create_all(bind=engine)
+    print("DB Connected ✅")
+except Exception as e:
+    print("DB Error ❌", e)
 
 # 🔥 ROUTES
 app.include_router(auth.router, prefix="/auth", tags=["Auth"])
