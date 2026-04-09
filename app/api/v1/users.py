@@ -1,9 +1,4 @@
 from fastapi import APIRouter, Depends
-from app.api.deps import get_current_user
-
-router = APIRouter()
-
-from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -12,6 +7,7 @@ from app.models.order import Order
 from app.models.review import Review
 
 router = APIRouter()
+
 
 @router.get("/me")
 def get_profile(
@@ -28,7 +24,9 @@ def get_profile(
     # ✅ avg rating
     avg_rating = db.query(func.avg(Review.rating))\
         .filter(Review.chef_id == current_user.id)\
-        .scalar() or 0
+        .scalar()
+
+    avg_rating = round(avg_rating, 1) if avg_rating else 0
 
     return {
         "id": str(current_user.id),
@@ -42,11 +40,10 @@ def get_profile(
         "specialties": chef.specialties if chef else None,
         "profile_image": chef.profile_image if chef and chef.profile_image else None,
 
-        # 🔥 NEW FIELDS
+        # 🔥 stats
         "total_orders": total_orders,
-        "avg_rating": round(avg_rating, 1),
-        "join_date": current_user.created_at
+        "avg_rating": avg_rating,
+
+        # 🔥 safe date format
+        "join_date": current_user.created_at.isoformat() if current_user.created_at else None
     }
-    
-    
-    

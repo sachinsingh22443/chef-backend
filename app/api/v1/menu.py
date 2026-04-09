@@ -1,20 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Query,UploadFile,Form,File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, Form, File
 from sqlalchemy.orm import Session
-from typing import Optional
-import shutil
-import uuid
-from app.models.order import Order
+from typing import Optional, List
+import cloudinary.uploader
+
 from app.models.menu import Menu
-from typing import List
-from app.models.menu import Menu
+from app.models.order_item import OrderItem
 from app.api.deps import get_db, get_current_user
-from app.schemas.menu import MenuCreate, MenuUpdate
+from sqlalchemy import func
 
 router = APIRouter()
 
-# ✅ Create Menu
-import cloudinary.uploader
-
+# ✅ CREATE MENU
 @router.post("/")
 async def create_menu(
     name: str = Form(...),
@@ -38,14 +34,27 @@ async def create_menu(
 ):
     image_urls = []
 
-    # 🔥 CLOUDINARY UPLOAD
+    # 🔥 FIXED CLOUDINARY UPLOAD
     if images:
         for img in images:
-            result = cloudinary.uploader.upload(
-                img.file,
-                folder="menu_items"
-            )
-            image_urls.append(result["secure_url"])  # ✅ URL save
+            try:
+                contents = await img.read()   # 🔥 IMPORTANT FIX
+
+                result = cloudinary.uploader.upload(
+                    contents,
+                    folder="menu_items"
+                )
+
+                image_urls.append(result["secure_url"])
+
+            except Exception as e:
+                print("❌ CLOUDINARY ERROR:", str(e))
+                raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
+
+    # 🔥 INGREDIENTS SAFE FIX
+    ingredient_list = (
+        ingredients.split(",") if ingredients and ingredients.strip() else []
+    )
 
     menu = Menu(
         chef_id=user.id,
@@ -60,8 +69,8 @@ async def create_menu(
         protein=protein,
         carbs=carbs,
         fats=fats,
-        ingredients=ingredients.split(",") if ingredients else [],
-        image_urls=image_urls   # ✅ URL list
+        ingredients=ingredient_list,
+        image_urls=image_urls
     )
 
     db.add(menu)
@@ -70,10 +79,8 @@ async def create_menu(
 
     return menu
 
-# ✅ Get Menu (with filters)
 
-
-# ✅ Update Menu
+# ✅ UPDATE MENU
 @router.put("/{menu_id}")
 async def update_menu(
     menu_id: str,
@@ -129,27 +136,37 @@ async def update_menu(
     if fats:
         menu.fats = fats
 
-    if ingredients:
+    if ingredients and ingredients.strip():
         menu.ingredients = ingredients.split(",")
 
-    # 🔥 IMAGE UPDATE (CLOUDINARY)
+    # 🔥 FIXED IMAGE UPDATE
     if images:
         image_urls = []
-        for img in images:
-            result = cloudinary.uploader.upload(
-                img.file,
-                folder="menu_items"
-            )
-            image_urls.append(result["secure_url"])
 
-        menu.image_urls = image_urls  # replace images
+        for img in images:
+            try:
+                contents = await img.read()
+
+                result = cloudinary.uploader.upload(
+                    contents,
+                    folder="menu_items"
+                )
+
+                image_urls.append(result["secure_url"])
+
+            except Exception as e:
+                print("❌ CLOUDINARY ERROR:", str(e))
+                raise HTTPException(status_code=500, detail=str(e))
+
+        menu.image_urls = image_urls
 
     db.commit()
     db.refresh(menu)
 
     return {"msg": "Menu updated", "images": menu.image_urls}
 
-# ✅ Delete Menu
+
+# ✅ DELETE MENU
 @router.delete("/{menu_id}")
 def delete_menu(
     menu_id: str,
@@ -170,10 +187,7 @@ def delete_menu(
     return {"msg": "Menu deleted"}
 
 
-from sqlalchemy import func
-from app.models.order_item import OrderItem  # import check karo
-from app.models.menu import Menu
-
+# ✅ TOP DISHES
 @router.get("/top-dishes")
 def get_top_dishes(
     limit: int = 5,
@@ -195,6 +209,7 @@ def get_top_dishes(
     return results
 
 
+# ✅ GET MENUS
 @router.get("/")
 def get_menus(
     category: Optional[str] = Query(None),

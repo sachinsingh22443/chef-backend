@@ -14,24 +14,15 @@ from app.utils.hashing import hash_password, verify_password
 
 
 
-router = APIRouter()
-
-
-
-
-
-
-
-import uuid
-
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
 
 import cloudinary.uploader
 
+router = APIRouter()
 
 
+# =========================
+# ✅ SIGNUP (FIXED)
+# =========================
 @router.post("/signup")
 async def signup(
     name: str = Form(...),
@@ -55,22 +46,22 @@ async def signup(
 
     db: Session = Depends(get_db)
 ):
-    # 🔍 Check existing user
     existing_user = db.query(User).filter(User.email == email).first()
     if existing_user:
         raise HTTPException(400, "Email already registered")
 
     try:
-        # 🔥 Upload profile image to Cloudinary
+        # 🔥 FIXED CLOUDINARY UPLOAD
+        profile_bytes = await profile_image.read()
         profile_result = cloudinary.uploader.upload(
-            profile_image.file,
+            profile_bytes,
             folder="chef_profiles"
         )
         profile_url = profile_result["secure_url"]
 
-        # 🔥 Upload FSSAI document to Cloudinary
+        fssai_bytes = await fssai_document.read()
         fssai_result = cloudinary.uploader.upload(
-            fssai_document.file,
+            fssai_bytes,
             folder="fssai_docs"
         )
         fssai_url = fssai_result["secure_url"]
@@ -85,15 +76,15 @@ async def signup(
             application_status="under_review"
         )
         db.add(new_user)
-        db.flush()  # ID generate
+        db.flush()
 
         # 🔹 Create Chef Profile
         chef = ChefProfile(
             user_id=new_user.id,
             address=address,
             fssai_number=fssai_number,
-            profile_image=profile_url,   # ✅ CLOUDINARY URL
-            fssai_document=fssai_url,    # ✅ CLOUDINARY URL
+            profile_image=profile_url,
+            fssai_document=fssai_url,
             account_holder_name=account_holder_name,
             account_number=account_number,
             ifsc_code=ifsc_code,
@@ -103,32 +94,27 @@ async def signup(
         )
 
         db.add(chef)
-
         db.commit()
-        db.refresh(new_user)
-        db.refresh(chef)
+
+        return {"msg": "Signup success"}
 
     except Exception as e:
         db.rollback()
-        raise HTTPException(500, str(e))
+        print("❌ SIGNUP ERROR:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-    return {"msg": "Signup success"}
 
-
+# =========================
+# ✅ LOGIN
+# =========================
 @router.post("/login")
 def login(user_data: LoginSchema, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == user_data.email).first()
 
-    # ✅ Avoid user enumeration
     if not user or not verify_password(user_data.password, user.password):
         raise HTTPException(status_code=400, detail="Invalid credentials")
 
-    # ✅ OTP check
-    # if not user.is_verified:
-    #     raise HTTPException(status_code=401, detail="Please verify OTP first")
-
-    # ✅ Account active check
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
 
@@ -139,47 +125,11 @@ def login(user_data: LoginSchema, db: Session = Depends(get_db)):
         "token_type": "bearer",
         "application_status": user.application_status
     }
-    
-    
-
-# from fastapi import APIRouter, Depends
-from app.api.deps import get_current_user
 
 
-@router.get("/status")
-def get_application_status(current_user=Depends(get_current_user)):
-    return {
-        "status": current_user.application_status,
-        "reason": current_user.rejection_reason
-    }
-    
-@router.put("/admin/approve/{user_id}")
-def approve_user(user_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-
-    user.application_status = "approved"
-    user.rejection_reason = None
-
-    db.commit()
-
-    return {"msg": "User approved"}
-
-@router.put("/admin/reject/{user_id}")
-def reject_user(user_id: str, reason: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-
-    user.application_status = "rejected"
-    user.rejection_reason = reason
-
-    db.commit()
-
-    return {"msg": "User rejected"}
-
-
-
-from fastapi import HTTPException, UploadFile, File, Form
-import cloudinary.uploader
-
+# =========================
+# ✅ UPDATE PROFILE (FIXED)
+# =========================
 @router.put("/users/update-profile")
 async def update_profile(
     name: str = Form(None),
@@ -195,15 +145,12 @@ async def update_profile(
     current_user: User = Depends(get_current_user)
 ):
     try:
-        # 🔹 USER update
         if name:
             current_user.name = name
         if phone:
             current_user.phone = phone
 
-        # 🔹 ChefProfile
         chef = current_user.chef_profile
-
         if not chef:
             raise HTTPException(status_code=404, detail="Chef profile not found")
 
@@ -214,20 +161,18 @@ async def update_profile(
         if specialties:
             chef.specialties = specialties
 
-        # 🔥 CLOUDINARY IMAGE UPDATE
+        # 🔥 FIXED IMAGE UPLOAD
         if profile_image:
+            contents = await profile_image.read()
+
             result = cloudinary.uploader.upload(
-                profile_image.file,
+                contents,
                 folder="chef_profiles"
             )
 
-            image_url = result["secure_url"]
-
-            chef.profile_image = image_url   # ✅ SAVE URL
+            chef.profile_image = result["secure_url"]
 
         db.commit()
-        db.refresh(current_user)
-        db.refresh(chef)
 
         return {
             "msg": "Profile updated successfully",
@@ -236,13 +181,13 @@ async def update_profile(
 
     except Exception as e:
         db.rollback()
+        print("❌ PROFILE ERROR:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 👈 tumhara file
-
-
-
+# =========================
+# ✅ CHANGE PASSWORD
+# =========================
 @router.put("/change-password")
 def change_password(
     data: ChangePasswordSchema,
@@ -253,7 +198,6 @@ def change_password(
         raise HTTPException(status_code=400, detail="Current password incorrect")
 
     user.password = hash_password(data.new_password)
-
     db.commit()
 
     return {"msg": "Password updated"}
