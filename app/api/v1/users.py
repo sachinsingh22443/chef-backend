@@ -45,5 +45,5 @@ def get_profile(
         "avg_rating": avg_rating,
 
         # 🔥 safe date format
-        "join_date": current_user.created_at.isoformat() if current_user.created_at else None
+        "join_date": current_user.created_at.strftime("%d %b %Y") 
     }
