@@ -1,6 +1,7 @@
+# app/schemas/notification.py
+
 from pydantic import BaseModel
 from uuid import UUID
-from datetime import datetime
 
 
 class NotificationResponse(BaseModel):
@@ -8,8 +9,8 @@ class NotificationResponse(BaseModel):
     type: str
     title: str
     message: str
-    is_read: bool
-    created_at: datetime
+    unread: bool   # 🔥 frontend compatible
+    time: str      # 🔥 formatted time
 
     class Config:
         from_attributes = True

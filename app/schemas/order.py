@@ -4,23 +4,27 @@ from uuid import UUID
 from datetime import datetime
 
 # =========================
-# 🧾 CREATE SCHEMAS
+# CREATE
 # =========================
 
+from pydantic import BaseModel
+from typing import List, Optional
+from uuid import UUID
+
 class OrderItemCreate(BaseModel):
-    menu_id: UUID
+    menu_id: Optional[UUID] = None
+    special_id: Optional[UUID] = None
     quantity: int
 
 
 class OrderCreate(BaseModel):
     items: List[OrderItemCreate]
-
-    # 🔥 NEW FIELD (IMPORTANT)
     address: str
+    payment_method: str
 
 
 # =========================
-# 📦 RESPONSE SCHEMAS
+# RESPONSE
 # =========================
 
 class OrderItemResponse(BaseModel):
@@ -35,11 +39,18 @@ class OrderResponse(BaseModel):
     status: str
     total_price: float
 
-    # 🔥 NEW FIELDS
     customer_name: Optional[str]
     phone: Optional[str]
     address: Optional[str]
     created_at: Optional[datetime]
+
+    payment_method: str
+    payment_status: str
+
+    # 🔥 NEW REFUND FIELDS
+    refund_status: Optional[str]
+    refund_amount: Optional[float]
+    refund_date: Optional[datetime]
 
     items: List[OrderItemResponse]
 

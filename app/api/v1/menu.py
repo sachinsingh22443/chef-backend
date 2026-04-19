@@ -213,14 +213,18 @@ def get_top_dishes(
 @router.get("/")
 def get_menus(
     category: Optional[str] = Query(None),
+    food_type: Optional[str] = Query(None),
     min_price: Optional[float] = Query(None),
     max_price: Optional[float] = Query(None),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Menu)
+    query = db.query(Menu).filter(Menu.is_available == True)
 
     if category:
         query = query.filter(Menu.category == category)
+
+    if food_type:
+        query = query.filter(Menu.food_type == food_type)
 
     if min_price:
         query = query.filter(Menu.price >= min_price)
@@ -229,3 +233,256 @@ def get_menus(
         query = query.filter(Menu.price <= max_price)
 
     return query.all()
+
+from uuid import UUID
+from app.models.user import User
+from uuid import UUID
+
+@router.get("/chef/{chef_id}")
+def get_chef_with_menu(
+    chef_id: UUID,
+    db: Session = Depends(get_db)
+):
+    chef = db.query(User).filter(User.id == chef_id).first()
+
+    if not chef:
+        raise HTTPException(status_code=404, detail="Chef not found")
+
+    menus = db.query(Menu).filter(Menu.chef_id == chef_id).all()
+
+    return {
+        "chef": {
+            "id": chef.id,
+            "name": chef.name,
+            "bio": chef.chef_profile.bio if chef.chef_profile else None,
+            "location": chef.chef_profile.location if chef.chef_profile else None,
+            "specialties": chef.chef_profile.specialties if chef.chef_profile else None,
+            "profile_image": chef.chef_profile.profile_image if chef.chef_profile else None
+        },
+        "menus": menus
+    }
+    
+    
+# get all chefs 
+@router.get("/chefs")
+def get_all_chefs(db: Session = Depends(get_db)):
+    chefs = db.query(User).filter(User.role == "chef").all()
+
+    return [
+        {
+            "id": str(c.id),  # 🔥 UUID string
+            "name": c.name,
+            "profile_image": c.chef_profile.profile_image if c.chef_profile else None,
+            "specialties": c.chef_profile.specialties if c.chef_profile else None
+        }
+        for c in chefs
+    ]
+    
+    
+    
+from math import radians, cos, sin, asin, sqrt
+# from app.database import get_db
+
+
+# 🔥 DISTANCE FUNCTION
+def calculate_distance(lat1, lon1, lat2, lon2):
+    R = 6371  # km
+
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+
+    return R * c
+
+
+# 🔥 MAIN API
+@router.get("/nearby-chefs")
+def get_nearby_chefs(
+    lat: float,
+    lng: float,
+    category: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    chefs = db.query(User).filter(User.role == "chef").all()
+
+    nearby_chefs = []
+
+    for chef in chefs:
+        profile = chef.chef_profile
+
+        # ❌ skip invalid profiles
+        if not profile:
+            continue
+
+        if profile.latitude is None or profile.longitude is None:
+            continue
+
+        # 🔥 DISTANCE CALCULATION
+        distance = calculate_distance(
+            lat,
+            lng,
+            profile.latitude,
+            profile.longitude
+        )
+
+        # ❌ skip >10km
+        if distance > 50:
+            continue
+
+        # 🔥 MENU QUERY
+        menus_query = db.query(Menu).filter(
+            Menu.chef_id == chef.id,
+            Menu.is_available == True
+        )
+
+        # 🔥 CATEGORY FILTER (FINAL FIX)
+        if category:
+            menus_query = menus_query.filter(
+                func.lower(Menu.category).contains(category.lower())
+            )
+
+        menus = menus_query.all()
+
+        # ❌ अगर menu नहीं → chef skip
+        if len(menus) == 0:
+            continue
+
+        nearby_chefs.append({
+            "id": str(chef.id),
+            "name": chef.name,
+            "profile_image": profile.profile_image,
+            "specialties": profile.specialties,
+            "distance": round(distance, 2),
+            "menus": menus
+        })
+
+    # 🔥 sort by distance
+    nearby_chefs.sort(key=lambda x: x["distance"])
+
+    return nearby_chefs
+
+
+# set location
+from app.models.user import ChefProfile, User
+# from fastapi import APIRouter, Depends, Form, HTTPException
+# from sqlalchemy.orm import Session
+
+
+from fastapi import APIRouter, Depends, Form, HTTPException
+from sqlalchemy.orm import Session
+# from app.database import get_db
+# from app.models.user import ChefProfile, User
+# from app.dependencies.auth import get_current_user
+import logging
+
+logger = logging.getLogger(__name__)
+
+@router.post("/chef/set-location")
+async def set_kitchen_location(
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    location: str = Form(...),
+
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # 🔴 ROLE CHECK
+        if current_user.role != "chef":
+            raise HTTPException(status_code=403, detail="Only chefs can set location")
+
+        # 🔴 VALIDATION
+        if not (-90 <= latitude <= 90):
+            raise HTTPException(status_code=400, detail="Invalid latitude")
+
+        if not (-180 <= longitude <= 180):
+            raise HTTPException(status_code=400, detail="Invalid longitude")
+
+        if not location.strip():
+            raise HTTPException(status_code=400, detail="Location cannot be empty")
+
+        # 🔍 FETCH CHEF PROFILE
+        chef = db.query(ChefProfile).filter(
+            ChefProfile.user_id == current_user.id
+        ).first()
+
+        if not chef:
+            raise HTTPException(status_code=404, detail="Chef profile not found")
+
+        # 🔥 SAVE LOCATION
+        chef.latitude = latitude
+        chef.longitude = longitude
+        chef.location = location.strip()
+
+        db.commit()
+        db.refresh(chef)
+
+        return {
+            "msg": "Kitchen location saved successfully",
+            "latitude": chef.latitude,
+            "longitude": chef.longitude,
+            "location": chef.location
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ LOCATION SAVE ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    
+    
+    
+
+# search chefs 
+@router.get("/search-chefs")
+def search_chefs(
+    query: str,
+    lat: float,
+    lng: float,
+    db: Session = Depends(get_db)
+):
+    chefs = db.query(User).filter(User.role == "chef").all()
+
+    results = []
+
+    for chef in chefs:
+        profile = chef.chef_profile
+
+        if not profile:
+            continue
+
+        if profile.latitude is None or profile.longitude is None:
+            continue
+
+        # 🔥 distance
+        distance = calculate_distance(
+            lat,
+            lng,
+            profile.latitude,
+            profile.longitude
+        )
+
+        # 🔥 10km filter
+        if distance > 10:
+            continue
+
+        # 🔥 search match (name + specialties)
+        if query.lower() in chef.name.lower() or (
+            profile.specialties and query.lower() in profile.specialties.lower()
+        ):
+            results.append({
+                "id": str(chef.id),
+                "name": chef.name,
+                "profile_image": profile.profile_image,
+                "specialties": profile.specialties,
+                "distance": round(distance, 2)
+            })
+
+    # 🔥 sort by distance
+    results.sort(key=lambda x: x["distance"])
+
+    return results

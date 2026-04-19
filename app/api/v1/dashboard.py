@@ -25,19 +25,26 @@ def get_dashboard(
     # ✅ TOTAL STATS
     # =========================
     total_orders = db.query(Order)\
-        .filter(Order.chef_id == user.id)\
-        .count()
+        .filter(
+            Order.chef_id == user.id,
+            Order.status != "cancelled"   # 🔥 FIX
+        ).count()
 
     total_earnings = db.query(func.sum(Earning.amount))\
         .filter(Earning.chef_id == user.id)\
         .scalar() or 0
 
-    today = datetime.utcnow().date()
+    # =========================
+    # ✅ TODAY RANGE (FIXED)
+    # =========================
+    start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
 
     today_earnings = db.query(func.sum(Earning.amount))\
         .filter(
             Earning.chef_id == user.id,
-            func.date(Earning.created_at) == today
+            Earning.created_at >= start,
+            Earning.created_at < end
         ).scalar() or 0
 
     # =========================
@@ -56,6 +63,7 @@ def get_dashboard(
     monthly_orders = db.query(Order)\
         .filter(
             Order.chef_id == user.id,
+            Order.status != "cancelled",
             func.extract('month', Order.created_at) == this_month,
             func.extract('year', Order.created_at) == this_year
         ).count()
@@ -70,28 +78,30 @@ def get_dashboard(
         .scalar() or 0
 
     # =========================
-    # ✅ WEEKLY DATA
+    # ✅ WEEKLY DATA (FIXED)
     # =========================
     week_data = []
 
     for i in range(7):
-        day = datetime.utcnow().date() - timedelta(days=i)
+        day_start = (datetime.utcnow() - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
 
         earning = db.query(func.sum(Earning.amount))\
             .filter(
                 Earning.chef_id == user.id,
-                func.date(Earning.created_at) == day
+                Earning.created_at >= day_start,
+                Earning.created_at < day_end
             ).scalar() or 0
 
         week_data.append({
-            "day": day.strftime("%a"),
+            "day": day_start.strftime("%a"),
             "earnings": earning
         })
 
     week_data.reverse()
 
     # =========================
-    # 🔥 TOP PERFORMING DISHES
+    # 🔥 TOP PERFORMING DISHES (FIXED)
     # =========================
     top_dishes_query = db.query(
         Menu.name,
@@ -102,7 +112,7 @@ def get_dashboard(
     .join(Order, Order.id == OrderItem.order_id)\
     .filter(
         Order.chef_id == user.id,
-        Order.status == "completed"
+        Order.status == "delivered"   # 🔥 FIX
     )\
     .group_by(Menu.name)\
     .order_by(func.sum(OrderItem.quantity).desc())\
@@ -132,9 +142,5 @@ def get_dashboard(
         "avg_order_value": avg_order_value,
 
         "weekly_data": week_data,
-
         "top_dishes": top_dishes
     }
-    
-    
-    

@@ -72,6 +72,7 @@ async def signup(
             email=email,
             phone=phone,
             password=hash_password(password),
+            role="chef",
             is_verified=False,
             application_status="under_review"
         )
@@ -145,44 +146,59 @@ async def update_profile(
     current_user: User = Depends(get_current_user)
 ):
     try:
+        # =========================
+        # ✅ COMMON UPDATE (ALL USERS)
+        # =========================
         if name:
             current_user.name = name
+
         if phone:
             current_user.phone = phone
 
         chef = current_user.chef_profile
-        if not chef:
-            raise HTTPException(status_code=404, detail="Chef profile not found")
 
-        if bio:
-            chef.bio = bio
-        if location:
-            chef.location = location
-        if specialties:
-            chef.specialties = specialties
-
-        # 🔥 FIXED IMAGE UPLOAD
+        # =========================
+        # 🖼 IMAGE UPLOAD (COMMON)
+        # =========================
         if profile_image:
             contents = await profile_image.read()
 
             result = cloudinary.uploader.upload(
                 contents,
-                folder="chef_profiles"
+                folder="profiles"
             )
 
-            chef.profile_image = result["secure_url"]
+            image_url = result["secure_url"]
+
+            if current_user.role == "chef" and chef:
+                chef.profile_image = image_url
+            else:
+                current_user.profile_image = image_url
+
+        # =========================
+        # 👨‍🍳 CHEF ONLY DATA
+        # =========================
+        if current_user.role == "chef" and chef:
+            if bio:
+                chef.bio = bio
+
+            if location:
+                chef.location = location
+
+            if specialties:
+                chef.specialties = specialties
 
         db.commit()
 
         return {
-            "msg": "Profile updated successfully",
-            "profile_image": chef.profile_image
+            "msg": "Profile updated successfully"
         }
 
     except Exception as e:
         db.rollback()
         print("❌ PROFILE ERROR:", str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # =========================
@@ -333,3 +349,14 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
     del reset_tokens[data.token]
 
     return {"msg": "Password reset successful"}
+
+
+
+
+
+
+
+
+
+    
+# get nearby chefs

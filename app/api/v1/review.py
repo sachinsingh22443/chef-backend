@@ -42,7 +42,22 @@ def create_review(
     return {"msg": "Review added"}
 
 
-@router.get("/")
-def get_reviews(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    reviews = db.query(Review).filter(Review.chef_id == user.id).all()
-    return reviews
+@router.get("/chef/{chef_id}")
+def get_chef_reviews(
+    chef_id: str,
+    db: Session = Depends(get_db)
+):
+    reviews = db.query(Review).filter(Review.chef_id == chef_id).all()
+
+    if not reviews:
+        return {
+            "avg_rating": 0,
+            "total_reviews": 0
+        }
+
+    avg_rating = sum(r.rating for r in reviews) / len(reviews)
+
+    return {
+        "avg_rating": round(avg_rating, 1),
+        "total_reviews": len(reviews)
+    }

@@ -11,8 +11,8 @@ class OrderItem(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"))
-    menu_id = Column(UUID(as_uuid=True), ForeignKey("menus.id"))
-
+    menu_id = Column(UUID(as_uuid=True), ForeignKey("menus.id"), nullable=True)
+    special_id = Column(UUID(as_uuid=True), ForeignKey("tomorrow_specials.id"), nullable=True)
     quantity = Column(Integer)
     price = Column(Float)
 

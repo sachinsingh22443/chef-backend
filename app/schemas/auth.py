@@ -23,6 +23,9 @@ class SignupSchema(BaseModel):
     location: str 
     specialties: str 
     
+    latitude: float | None = None
+    longitude: float | None = None
+    
 from pydantic import BaseModel, EmailStr, Field
 
 class LoginSchema(BaseModel):
@@ -34,3 +37,5 @@ from pydantic import BaseModel
 class ChangePasswordSchema(BaseModel):
     current_password: str
     new_password: str
+
+

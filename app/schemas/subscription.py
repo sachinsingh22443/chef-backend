@@ -1,17 +1,35 @@
 from pydantic import BaseModel
-from datetime import datetime
+from typing import List
 from uuid import UUID
-from typing import List, Optional
+from datetime import datetime
 
 
+# 🔥 CREATE (frontend → backend)
 class SubscriptionCreate(BaseModel):
     chef_id: UUID
     menu_id: UUID
-    plan_name: str
-    price: float
+
+    plan_id: str   # 🔥 IMPORTANT
+
     meals_per_day: int
 
-    customer_name: str
+    delivery_days: List[str]
+    delivery_time: str
+
+    address: str
+
+    start_date: datetime
+    end_date: datetime
+
+
+# 🔥 RESPONSE (backend → frontend)
+class SubscriptionOut(BaseModel):
+    id: UUID
+
+    plan_id: str
+    price: float
+
+    meals_per_day: int
     dish_name: str
 
     delivery_days: List[str]
@@ -21,17 +39,6 @@ class SubscriptionCreate(BaseModel):
     start_date: datetime
     end_date: datetime
 
-
-class SubscriptionResponse(BaseModel):
-    id: UUID
-    customer: str
-    plan: str
-    dish: str
-    quantity: int
-    startDate: str
-    days: List[str]
-    time: str
-    amount: float
     status: str
 
     class Config:
