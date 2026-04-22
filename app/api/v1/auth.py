@@ -1,19 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from sqlalchemy.orm import Session
-from app.schemas.auth import LoginSchema
-from app.models.user import User
-from app.models.user import ChefProfile
-from app.api.deps import get_db
-from app.utils.hashing import hash_password,verify_password
-from app.core.security import create_access_token
-import os
-from app.schemas.auth import ChangePasswordSchema
+from datetime import datetime, timedelta
+import os, secrets, smtplib
 
+from app.models.user import User, ChefProfile
+from app.schemas.auth import LoginSchema, ChangePasswordSchema
 from app.api.deps import get_db, get_current_user
-from app.utils.hashing import hash_password, verify_password  
-
-
-
+from app.utils.hashing import hash_password, verify_password
+from app.core.security import create_access_token
 
 import cloudinary.uploader
 
@@ -46,27 +40,33 @@ async def signup(
 
     db: Session = Depends(get_db)
 ):
-    existing_user = db.query(User).filter(User.email == email).first()
-    if existing_user:
-        raise HTTPException(400, "Email already registered")
-
     try:
-        # 🔥 FIXED CLOUDINARY UPLOAD
-        profile_bytes = await profile_image.read()
-        profile_result = cloudinary.uploader.upload(
-            profile_bytes,
+        # ✅ NEW: password validation
+        if len(password) < 6:
+            raise HTTPException(400, "Password must be at least 6 characters")
+
+        existing_user = db.query(User).filter(User.email == email).first()
+        if existing_user:
+            raise HTTPException(400, "Email already registered")
+
+        # ✅ NEW: file validation
+        if profile_image.content_type not in ["image/jpeg", "image/png"]:
+            raise HTTPException(400, "Invalid profile image")
+
+        if fssai_document.content_type not in ["image/jpeg", "image/png", "application/pdf"]:
+            raise HTTPException(400, "Invalid FSSAI document")
+
+        # upload images
+        profile_url = cloudinary.uploader.upload(
+            await profile_image.read(),
             folder="chef_profiles"
-        )
-        profile_url = profile_result["secure_url"]
+        )["secure_url"]
 
-        fssai_bytes = await fssai_document.read()
-        fssai_result = cloudinary.uploader.upload(
-            fssai_bytes,
+        fssai_url = cloudinary.uploader.upload(
+            await fssai_document.read(),
             folder="fssai_docs"
-        )
-        fssai_url = fssai_result["secure_url"]
+        )["secure_url"]
 
-        # 🔹 Create User
         new_user = User(
             name=name,
             email=email,
@@ -76,10 +76,10 @@ async def signup(
             is_verified=False,
             application_status="under_review"
         )
+
         db.add(new_user)
         db.flush()
 
-        # 🔹 Create Chef Profile
         chef = ChefProfile(
             user_id=new_user.id,
             address=address,
@@ -101,9 +101,7 @@ async def signup(
 
     except Exception as e:
         db.rollback()
-        print("❌ SIGNUP ERROR:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
+        raise HTTPException(500, str(e))
 
 # =========================
 # ✅ LOGIN
@@ -119,15 +117,25 @@ def login(user_data: LoginSchema, db: Session = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is disabled")
 
-    token = create_access_token({"sub": str(user.id)})
+    # ✅ NEW: role check
+    if user.role != "chef":
+        raise HTTPException(status_code=403, detail="Not a chef account")
+
+    # ✅ NEW: approval check
+    if user.application_status != "approved":
+        raise HTTPException(status_code=403, detail="Your account is under review")
+
+    # ✅ NEW: role in token
+    token = create_access_token({
+        "sub": str(user.id),
+        "role": user.role
+    })
 
     return {
         "access_token": token,
         "token_type": "bearer",
         "application_status": user.application_status
     }
-
-
 # =========================
 # ✅ UPDATE PROFILE (FIXED)
 # =========================
@@ -213,11 +221,13 @@ def change_password(
     if not verify_password(data.current_password, user.password):
         raise HTTPException(status_code=400, detail="Current password incorrect")
 
+    if len(data.new_password) < 6:
+        raise HTTPException(400, "Password too short")
+
     user.password = hash_password(data.new_password)
     db.commit()
 
     return {"msg": "Password updated"}
-
 
 
 import os
@@ -294,9 +304,14 @@ If you did not request this, please ignore this email.
 # 🔐 FORGOT PASSWORD
 # =========================
 
-@router.post("/forgot-password")
-def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
+from fastapi import BackgroundTasks
 
+@router.post("/forgot-password")
+def forgot_password(
+    data: ForgotPasswordSchema,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     user = db.query(User).filter(User.email == data.email).first()
 
     if not user:
@@ -309,13 +324,12 @@ def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_db)):
         "expires": datetime.utcnow() + timedelta(minutes=15)
     }
 
-    # ⚠️ FRONTEND PORT CHANGE ACCORDINGLY
-    reset_link = f"http://localhost:5173/auth/reset-password/{token}"
+    # ✅ NEW: env based URL
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    reset_link = f"{FRONTEND_URL}/auth/reset-password/{token}"
 
-    # DEBUG (optional)
-    print("RESET LINK:", reset_link)
-
-    send_reset_email(user.email, reset_link)
+    # ✅ NEW: background email
+    background_tasks.add_task(send_reset_email, user.email, reset_link)
 
     return {"msg": "Reset link sent to your email"}
 
@@ -357,6 +371,14 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
 
 
 
+@router.delete("/delete-account")
+def delete_account(
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    db.delete(user)
+    db.commit()
 
+    return {"msg": "Account deleted"}
     
 # get nearby chefs
