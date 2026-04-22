@@ -21,16 +21,37 @@ router = APIRouter()
 
 from pydantic import BaseModel
 
+from pydantic import BaseModel
+from fastapi import HTTPException
+
 class SendOtpSchema(BaseModel):
     phone: str
 
 
 @router.post("/send-otp")
 def send(data: SendOtpSchema):
-    res = send_otp(data.phone)
+
+    # 🔥 IMPORTANT: phone format fix (India)
+    phone = data.phone
+    if not phone.startswith("91"):
+        phone = "91" + phone
+
+    res = send_otp(phone)
+
+    print("MSG91 RESPONSE:", res)  # 🔥 DEBUG
+
+    # 🔥 SUCCESS
     if res.get("type") == "success":
-        return {"message": "OTP sent"}
-    raise HTTPException(400, "OTP failed")
+        return {
+            "message": "OTP sent successfully",
+            "details": res   # 🔥 full response show karo
+        }
+
+    # 🔴 FAIL CASE
+    raise HTTPException(
+        status_code=400,
+        detail=res  # 🔥 real error dikhega
+    )
 
 # SIGNUP
 @router.post("/signup")
