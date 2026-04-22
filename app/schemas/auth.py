@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 
 # =========================
@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 # =========================
 class CustomerSignupSchema(BaseModel):
     phone: str
-    password: str = Field(min_length=6)   # 🔥 fixed
+    password: str = Field(min_length=6)
     otp: str
 
 
@@ -19,14 +19,22 @@ class CustomerLoginSchema(BaseModel):
 
 
 # =========================
-# 🔐 FORGOT PASSWORD (OTP)
+# 👨‍🍳 CHEF LOGIN (🔥 ADD THIS)
+# =========================
+class ChefLoginSchema(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+
+
+# =========================
+# 🔐 FORGOT PASSWORD (OTP - CUSTOMER)
 # =========================
 class CustomerForgotPasswordSchema(BaseModel):
     phone: str
 
 
 # =========================
-# 🔑 RESET PASSWORD (OTP)
+# 🔑 RESET PASSWORD (OTP - CUSTOMER)
 # =========================
 class CustomerResetPasswordSchema(BaseModel):
     phone: str
@@ -35,8 +43,20 @@ class CustomerResetPasswordSchema(BaseModel):
 
 
 # =========================
-# 🔑 CHANGE PASSWORD
+# 🔑 CHANGE PASSWORD (COMMON)
 # =========================
 class ChangePasswordSchema(BaseModel):
     current_password: str
+    new_password: str = Field(min_length=6)
+
+
+# =========================
+# 🔐 EMAIL BASED RESET (CHEF)
+# =========================
+class ForgotPasswordSchema(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordSchema(BaseModel):
+    token: str
     new_password: str = Field(min_length=6)

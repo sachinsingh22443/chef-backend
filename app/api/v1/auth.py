@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import os, secrets, smtplib
 
 from app.models.user import User, ChefProfile
-from app.schemas.auth import LoginSchema, ChangePasswordSchema
+from app.schemas.auth import ChefLoginSchema, ChangePasswordSchema
 from app.api.deps import get_db, get_current_user
 from app.utils.hashing import hash_password, verify_password
 from app.core.security import create_access_token
@@ -109,7 +109,7 @@ async def signup(
 # ✅ LOGIN
 # =========================
 @router.post("/login")
-def login(user_data: LoginSchema, db: Session = Depends(get_db)):
+def login(user_data:ChefLoginSchema, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == user_data.email).first()
 
