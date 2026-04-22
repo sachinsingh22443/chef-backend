@@ -14,7 +14,7 @@ from app.utils.hashing import hash_password, verify_password
 from app.core.security import create_access_token
 from app.services.msg91 import send_otp, verify_otp
 
-from app.schemas.auth import SignupSchema, LoginSchema, ResetPasswordSchema, ChangePasswordSchema
+from app.schemas.auth import CustomerLoginSchema,CustomerSignupSchema,CustomerForgotPasswordSchema,CustomerResetPasswordSchema,ChangePasswordSchema
 
 router = APIRouter()
 
@@ -29,7 +29,7 @@ def send(phone: str):
 
 # SIGNUP
 @router.post("/signup")
-def signup(data: SignupSchema, db: Session = Depends(get_db)):
+def signup(data: CustomerSignupSchema, db: Session = Depends(get_db)):
 
     if len(data.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
@@ -72,7 +72,7 @@ def signup(data: SignupSchema, db: Session = Depends(get_db)):
 
 
 @router.post("/login")
-def login(data: LoginSchema, db: Session = Depends(get_db)):
+def login(data: CustomerLoginSchema, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.phone == data.phone).first()
 
@@ -101,7 +101,7 @@ def forgot(phone: str):
 
 # RESET PASSWORD
 @router.post("/reset-password")
-def reset(data: ResetPasswordSchema, db: Session = Depends(get_db)):
+def reset(data: CustomerResetPasswordSchema, db: Session = Depends(get_db)):
 
     if len(data.new_password) < 6:
         raise HTTPException(400, "Password too short")
