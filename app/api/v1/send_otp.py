@@ -11,7 +11,7 @@ from app.api.deps import get_db, get_current_user
 from app.models.user import User
 from app.utils.hashing import hash_password, verify_password
 
-from app.core.security import hash_password, verify_password,create_access_token
+from app.core.security import create_access_token
 from app.services.msg91 import send_otp, verify_otp
 
 from app.schemas.auth import SignupSchema, LoginSchema, ResetPasswordSchema, ChangePasswordSchema
