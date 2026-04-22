@@ -89,8 +89,8 @@ def signup(data: CustomerSignupSchema, db: Session = Depends(get_db)):
 
 
 
-@router.post("/login")
-def login(data: CustomerLoginSchema, db: Session = Depends(get_db)):
+@router.post("/loginapi")
+def loginapi(data: CustomerLoginSchema, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.phone == data.phone).first()
 
