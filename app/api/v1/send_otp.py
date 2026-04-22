@@ -31,28 +31,20 @@ class SendOtpSchema(BaseModel):
 @router.post("/send-otp")
 def send(data: SendOtpSchema):
 
-    # 🔥 IMPORTANT: phone format fix (India)
-    phone = data.phone
-    if not phone.startswith("91"):
-        phone = "91" + phone
+    res = send_otp(data.phone)
 
-    res = send_otp(phone)
+    print("MSG91 RESPONSE:", res)
 
-    print("MSG91 RESPONSE:", res)  # 🔥 DEBUG
-
-    # 🔥 SUCCESS
     if res.get("type") == "success":
         return {
             "message": "OTP sent successfully",
-            "details": res   # 🔥 full response show karo
+            "details": res
         }
 
-    # 🔴 FAIL CASE
     raise HTTPException(
         status_code=400,
-        detail=res  # 🔥 real error dikhega
+        detail=res
     )
-
 # SIGNUP
 @router.post("/signup")
 def signup(data: CustomerSignupSchema, db: Session = Depends(get_db)):
@@ -120,9 +112,8 @@ def login(data: CustomerLoginSchema, db: Session = Depends(get_db)):
         "user_id": str(user.id)
     }
 # FORGOT PASSWORD
-@router.post("/forgot-password")
 def forgot(data: CustomerForgotPasswordSchema):
-    return send_otp(data.phone)
+    return send({"phone": data.phone})  # reuse same logic
 
 
 # RESET PASSWORD

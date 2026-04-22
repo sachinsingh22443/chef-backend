@@ -4,12 +4,21 @@ import os
 API_KEY = os.getenv("MSG91_API_KEY")
 TEMPLATE_ID = os.getenv("MSG91_TEMPLATE_ID")
 
+
+def format_phone(phone: str):
+    if phone.startswith("91"):
+        return phone
+    return "91" + phone
+
+
 def send_otp(phone: str):
-    url = "https://control.msg91.com/api/v5/otp"
+    url = "https://api.msg91.com/api/v5/otp"
+
+    phone = format_phone(phone)
 
     payload = {
         "template_id": TEMPLATE_ID,
-        "mobile": f"91{phone}"
+        "mobile": phone
     }
 
     headers = {
@@ -17,14 +26,19 @@ def send_otp(phone: str):
         "Content-Type": "application/json"
     }
 
-    return requests.post(url, json=payload, headers=headers).json()
+    res = requests.post(url, json=payload, headers=headers)
+    print("MSG91 SEND OTP:", res.json())  # debug
+
+    return res.json()
 
 
 def verify_otp(phone: str, otp: str):
-    url = "https://control.msg91.com/api/v5/otp/verify"
+    url = "https://api.msg91.com/api/v5/otp/verify"
+
+    phone = format_phone(phone)
 
     payload = {
-        "mobile": f"91{phone}",
+        "mobile": phone,
         "otp": otp
     }
 
@@ -33,4 +47,7 @@ def verify_otp(phone: str, otp: str):
         "Content-Type": "application/json"
     }
 
-    return requests.post(url, json=payload, headers=headers).json()
+    res = requests.post(url, json=payload, headers=headers)
+    print("MSG91 VERIFY OTP:", res.json())  # debug
+
+    return res.json()
