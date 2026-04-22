@@ -46,8 +46,8 @@ def send(data: SendOtpSchema):
         detail=res
     )
 # SIGNUP
-@router.post("/signup")
-def signup(data: CustomerSignupSchema, db: Session = Depends(get_db)):
+@router.post("/signupapi")
+def signupapi(data: CustomerSignupSchema, db: Session = Depends(get_db)):
 
     if len(data.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
