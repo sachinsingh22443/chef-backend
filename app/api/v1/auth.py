@@ -10,6 +10,8 @@ from app.utils.hashing import hash_password, verify_password
 from app.core.security import create_access_token
 
 import cloudinary.uploader
+from email.mime.text import MIMEText
+from fastapi import BackgroundTasks
 
 router = APIRouter()
 
@@ -230,20 +232,6 @@ def change_password(
     return {"msg": "Password updated"}
 
 
-import os
-import secrets
-import smtplib
-
-from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
-
-from app.models.user import User
-from app.api.deps import get_db
-from app.utils.hashing import hash_password
 
 
 # 🔥 TEMP STORAGE (production में DB use करना)
@@ -252,7 +240,7 @@ reset_tokens = {}
 # =========================
 # ✅ SCHEMAS
 # =========================
-
+from pydantic import BaseModel
 class ForgotPasswordSchema(BaseModel):
     email: str
 

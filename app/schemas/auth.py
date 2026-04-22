@@ -1,74 +1,42 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 
-class BaseResponse(BaseModel):
-    message: str
-    
+# =========================
+# 📱 CUSTOMER SIGNUP
+# =========================
 class CustomerSignupSchema(BaseModel):
     phone: str
-    password: str = Field(min_length=4)
+    password: str = Field(min_length=6)   # 🔥 fixed
     otp: str
 
 
+# =========================
+# 🔐 CUSTOMER LOGIN
+# =========================
 class CustomerLoginSchema(BaseModel):
     phone: str
-    password: str
+    password: str = Field(min_length=6)
 
 
+# =========================
+# 🔐 FORGOT PASSWORD (OTP)
+# =========================
 class CustomerForgotPasswordSchema(BaseModel):
     phone: str
 
 
+# =========================
+# 🔑 RESET PASSWORD (OTP)
+# =========================
 class CustomerResetPasswordSchema(BaseModel):
     phone: str
     otp: str
-    new_password: str = Field(min_length=4)
-    
-    
-class ChefSignupSchema(BaseModel):
-    name: str
-    email: EmailStr
-    phone: str
-    password: str = Field(min_length=4)
-
-    address: str
-    fssai_number: str
-
-    account_holder_name: str
-    account_number: str
-    ifsc_code: str
-
-    bio: str
-    location: str
-    specialties: str
-
-    latitude: float | None = None
-    longitude: float | None = None
+    new_password: str = Field(min_length=6)
 
 
-class ChefLoginSchema(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=4)
-    
-    
+# =========================
+# 🔑 CHANGE PASSWORD
+# =========================
 class ChangePasswordSchema(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=4)
-
-
-class ForgotPasswordSchema(BaseModel):
-    email: EmailStr
-
-
-class ResetPasswordSchema(BaseModel):
-    token: str
-    new_password: str = Field(min_length=4)
-    
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user_id: str
-
-
-class LoginResponse(TokenResponse):
-    application_status: str | None = None
+    new_password: str = Field(min_length=6)

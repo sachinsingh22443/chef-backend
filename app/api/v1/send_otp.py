@@ -19,13 +19,18 @@ from app.schemas.auth import CustomerLoginSchema,CustomerSignupSchema,CustomerFo
 router = APIRouter()
 
 
+from pydantic import BaseModel
+
+class SendOtpSchema(BaseModel):
+    phone: str
+
+
 @router.post("/send-otp")
-def send(phone: str):
-    res = send_otp(phone)
+def send(data: SendOtpSchema):
+    res = send_otp(data.phone)
     if res.get("type") == "success":
         return {"message": "OTP sent"}
     raise HTTPException(400, "OTP failed")
-
 
 # SIGNUP
 @router.post("/signup")
@@ -95,16 +100,13 @@ def login(data: CustomerLoginSchema, db: Session = Depends(get_db)):
     }
 # FORGOT PASSWORD
 @router.post("/forgot-password")
-def forgot(phone: str):
-    return send_otp(phone)
+def forgot(data: CustomerForgotPasswordSchema):
+    return send_otp(data.phone)
 
 
 # RESET PASSWORD
 @router.post("/reset-password")
 def reset(data: CustomerResetPasswordSchema, db: Session = Depends(get_db)):
-
-    if len(data.new_password) < 6:
-        raise HTTPException(400, "Password too short")
 
     otp_check = verify_otp(data.phone, data.otp)
 
@@ -115,10 +117,14 @@ def reset(data: CustomerResetPasswordSchema, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(404, "User not found")
 
+    # 🔥 NEW: same password check
+    if verify_password(data.new_password, user.password):
+        raise HTTPException(400, "New password cannot be same as old password")
+
     user.password = hash_password(data.new_password)
     db.commit()
 
-    return {"message": "Password updated"}
+    return {"message": "Password updated successfully"}
 
 
 # CHANGE PASSWORD
@@ -131,13 +137,14 @@ def change(
     if not verify_password(data.current_password, user.password):
         raise HTTPException(400, "Wrong password")
 
-    if len(data.new_password) < 6:
-        raise HTTPException(400, "Password too short")
+    # 🔥 NEW: same password check
+    if verify_password(data.new_password, user.password):
+        raise HTTPException(400, "New password cannot be same as old password")
 
     user.password = hash_password(data.new_password)
     db.commit()
 
-    return {"message": "Password changed"}
+    return {"message": "Password changed successfully"}
 
 
 # DELETE ACCOUNT
