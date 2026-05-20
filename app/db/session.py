@@ -3,17 +3,20 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-load_dotenv()  # 🔥 sabse pehle
+load_dotenv()
 
-# render database
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"sslmode": "require"}
+    pool_pre_ping=True,
+    connect_args={
+        "sslmode": "require"
+    }
 )
 
-
-
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
