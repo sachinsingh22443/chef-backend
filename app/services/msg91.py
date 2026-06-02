@@ -12,42 +12,65 @@ def format_phone(phone: str):
 
 
 def send_otp(phone: str):
-    url = "https://api.msg91.com/api/v5/otp"
+    try:
+        url = "https://api.msg91.com/api/v5/otp"
 
-    phone = format_phone(phone)
+        payload = {
+            "template_id": TEMPLATE_ID,
+            "mobile": format_phone(phone)
+        }
 
-    payload = {
-        "template_id": TEMPLATE_ID,
-        "mobile": phone
-    }
+        headers = {
+            "authkey": API_KEY,
+            "Content-Type": "application/json"
+        }
 
-    headers = {
-        "authkey": API_KEY,
-        "Content-Type": "application/json"
-    }
+        print("PAYLOAD:", payload)
 
-    res = requests.post(url, json=payload, headers=headers)
-    print("MSG91 SEND OTP:", res.json())  # debug
+        res = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
 
-    return res.json()
+        print("STATUS CODE:", res.status_code)
+        print("RAW RESPONSE:", res.text)
 
+        return res.json()
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        return {
+            "type": "error",
+            "message": str(e)
+        }
 
 def verify_otp(phone: str, otp: str):
-    url = "https://api.msg91.com/api/v5/otp/verify"
+    try:
+        url = "https://api.msg91.com/api/v5/otp/verify"
 
-    phone = format_phone(phone)
+        payload = {
+            "mobile": format_phone(phone),
+            "otp": otp
+        }
 
-    payload = {
-        "mobile": phone,
-        "otp": otp
-    }
+        headers = {
+            "authkey": API_KEY,
+            "Content-Type": "application/json"
+        }
 
-    headers = {
-        "authkey": API_KEY,
-        "Content-Type": "application/json"
-    }
+        res = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=15
+        )
 
-    res = requests.post(url, json=payload, headers=headers)
-    print("MSG91 VERIFY OTP:", res.json())  # debug
+        return res.json()
 
-    return res.json()
+    except Exception as e:
+        return {
+            "type": "error",
+            "message": str(e)
+        }
