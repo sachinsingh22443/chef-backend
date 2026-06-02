@@ -113,7 +113,7 @@ def loginapi(data: CustomerLoginSchema, db: Session = Depends(get_db)):
     }
 # FORGOT PASSWORD
 # FORGOT PASSWORD
-@router.post("/forgot-password")
+@router.post("/customer/forgot-password")
 def forgot(data: CustomerForgotPasswordSchema):
 
     res = send_otp(data.phone)
@@ -130,7 +130,7 @@ def forgot(data: CustomerForgotPasswordSchema):
     )
 
 # RESET PASSWORD
-@router.post("/reset-password")
+@router.post("/customer/reset-password")
 def reset(data: CustomerResetPasswordSchema, db: Session = Depends(get_db)):
 
     otp_check = verify_otp(data.phone, data.otp)
@@ -153,7 +153,7 @@ def reset(data: CustomerResetPasswordSchema, db: Session = Depends(get_db)):
 
 
 # CHANGE PASSWORD
-@router.post("/change-password")
+@router.post("/customer/change-password")
 def change(
     data: ChangePasswordSchema,
     db: Session = Depends(get_db),
