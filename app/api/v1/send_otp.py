@@ -112,9 +112,22 @@ def loginapi(data: CustomerLoginSchema, db: Session = Depends(get_db)):
         "user_id": str(user.id)
     }
 # FORGOT PASSWORD
+# FORGOT PASSWORD
+@router.post("/forgot-password")
 def forgot(data: CustomerForgotPasswordSchema):
-    return send({"phone": data.phone})  # reuse same logic
 
+    res = send_otp(data.phone)
+
+    if res.get("type") == "success":
+        return {
+            "message": "OTP sent successfully",
+            "details": res
+        }
+
+    raise HTTPException(
+        status_code=400,
+        detail=res
+    )
 
 # RESET PASSWORD
 @router.post("/reset-password")
