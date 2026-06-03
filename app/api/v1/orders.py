@@ -498,7 +498,7 @@ def verify_payment(
         order.payment_id = data.get("razorpay_payment_id")
 
         # बेहतर flow
-        order.status = "accepted"   # 🔥 CHANGE (not directly preparing)
+        order.status = "pending"   # 🔥 CHANGE (not directly preparing)
 
         # =========================
         # 🛒 CLEAR CART
