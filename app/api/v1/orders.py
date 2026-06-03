@@ -561,18 +561,37 @@ def update_status(
     # 🔥 VALID STATUS CHECK
     # =========================
     valid_status = [
-        "pending",
-        "accepted",
-        "preparing",
-        "ready",
-        "delivered",
-        "cancelled"
-    ]
+    "pending",
+    "accepted",
+    "preparing",
+    "ready",
+    "out_for_delivery",
+    "delivered",
+    "cancelled"
+]
 
     if status not in valid_status:
-        raise HTTPException(status_code=400, detail="Invalid status")
+     raise HTTPException(status_code=400, detail="Invalid status")
 
     old_status = order.status
+    if order.status == status:
+     return {"msg": "already updated", "status": status}
+
+    allowed_transitions = {
+    "pending": ["accepted", "cancelled"],
+    "accepted": ["preparing", "cancelled"],
+    "preparing": ["ready"],
+    "ready": ["out_for_delivery"],
+    "out_for_delivery": ["delivered"],
+    "delivered": [],
+    "cancelled": []
+}
+
+    if status not in allowed_transitions.get(order.status, []):
+     raise HTTPException(
+        status_code=400,
+        detail=f"Cannot change status from {order.status} to {status}"
+    )
 
     # =========================
     # 🔥 UPDATE STATUS
