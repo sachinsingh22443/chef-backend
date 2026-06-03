@@ -279,6 +279,12 @@ def create_order(
             title="New Order Received",
             message=f"You received an order of ₹{total_price}"
         ))
+        db.add(Notification(
+        user_id=user.id,
+        type="order",
+        title="Order Placed",
+        message=f"Your order for ₹{total_price} has been placed successfully."
+        ))
 
         # =========================
         # 🛒 CLEAR CART (COD)
@@ -495,6 +501,12 @@ def verify_payment(
         # 💳 UPDATE PAYMENT
         # =========================
         order.payment_status = "paid"
+        db.add(Notification(
+        user_id=order.user_id,
+        type="payment",
+        title="Payment Successful",
+        message=f"Payment of ₹{order.total_price} received successfully."
+))
         order.payment_id = data.get("razorpay_payment_id")
 
         # बेहतर flow
@@ -597,6 +609,48 @@ def update_status(
     # 🔥 UPDATE STATUS
     # =========================
     order.status = status
+    if status == "accepted":
+     db.add(Notification(
+        user_id=order.user_id,
+        type="order",
+        title="Order Accepted",
+        message="Your order has been accepted by the chef."
+    ))
+    if status == "preparing":
+     db.add(Notification(
+        user_id=order.user_id,
+        type="order",
+        title="Preparing Your Food",
+        message="Chef has started preparing your food."
+    ))
+    if status == "ready":
+       db.add(Notification(
+        user_id=order.user_id,
+        type="order",
+        title="Food Ready",
+        message="Your food is ready and waiting for pickup."
+    ))
+    if status == "out_for_delivery":
+     db.add(Notification(
+        user_id=order.user_id,
+        type="delivery",
+        title="Out For Delivery",
+        message="Your order is on the way."
+    ))
+    if status == "delivered":
+     db.add(Notification(
+        user_id=order.user_id,
+        type="order",
+        title="Order Delivered",
+        message="Enjoy your meal! Your order has been delivered."
+    ))
+    if status == "cancelled":
+     db.add(Notification(
+        user_id=order.user_id,
+        type="order",
+        title="Order Cancelled",
+        message="Your order has been cancelled."
+    ))
 
     # =========================
     # 💸 CANCEL → REFUND INIT
