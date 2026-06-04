@@ -171,6 +171,9 @@ def change(
 
     return {"message": "Password changed successfully"}
 
+@router.get("/verify-token")
+def verify_token(current_user=Depends(get_current_user)):
+    return {"valid": True}
 
 # DELETE ACCOUNT
 @router.delete("/delete-account")
