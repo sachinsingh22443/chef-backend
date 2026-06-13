@@ -22,6 +22,9 @@ class OrderCreate(BaseModel):
     address: str
     payment_method: str
 
+    amount: Optional[float] = None
+    is_subscription: bool = False
+
 
 # =========================
 # RESPONSE

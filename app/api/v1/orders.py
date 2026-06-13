@@ -267,6 +267,8 @@ def create_order(
         # =========================
         # 🔥 FINAL UPDATE
         # =========================
+        if data.is_subscription and data.amount:
+            total_price = data.amount
         order.total_price = total_price
         order.chef_id = chef_id
 
