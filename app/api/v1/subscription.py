@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
+import uuid
 
 from app.api.deps import get_db, get_current_user
 from app.models.subscription import Subscription
