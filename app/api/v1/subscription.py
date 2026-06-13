@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
 import uuid
+from app.models.notification import Notification
 
 from app.api.deps import get_db, get_current_user
 from app.models.subscription import Subscription
@@ -265,6 +266,26 @@ def create_subscription(
         db.add(sub)
         db.commit()
         db.refresh(sub)
+        
+        # 🔥 CUSTOMER NOTIFICATION
+        customer_notification = Notification(
+         user_id=user.id,
+         type="subscription",
+         title="Subscription Activated 🎉",
+         message=f"Your {plan.title} subscription has been activated successfully."
+         )
+
+# 🔥 CHEF NOTIFICATION
+        chef_notification = Notification(
+        user_id=menu.chef_id,
+        type="subscription",
+        title="New Subscription Received 🍱",
+        message=f"{user.name} subscribed to your {plan.title} plan."
+        )
+
+        db.add(customer_notification)
+        db.add(chef_notification)
+        db.commit()
     except Exception:
         db.rollback()
         raise HTTPException(500, "Database error")
