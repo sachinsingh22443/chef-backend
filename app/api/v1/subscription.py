@@ -245,7 +245,7 @@ def create_subscription(
         menu_id=data.menu_id,
 
         customer_name=user.name,
-        dish_name=data.dish_name,
+        dish_name=menu.name, 
 
         plan_id=plan.id,
         price=plan.price,
