@@ -415,13 +415,29 @@ def my_subscriptions(
             SubscriptionPlan.id == s.plan_id
         ).first()
 
+        chef = db.query(User).filter(
+            User.id == s.chef_id
+        ).first()
+
         result.append({
             "id": str(s.id),
+
             "plan": plan.title if plan else "Subscription Plan",
-            "dish": s.dish_name,
+
+            "chefName": chef.name if chef else "Chef",
+
+            
+
             "startDate": s.start_date.strftime("%b %d, %Y"),
+
+            "endDate": s.end_date.strftime("%b %d, %Y"),
+
             "time": s.delivery_time,
+
+            "days": s.delivery_days or [],
+
             "status": s.status,
+
             "price": s.price
         })
 
