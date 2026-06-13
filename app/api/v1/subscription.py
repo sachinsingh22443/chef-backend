@@ -399,3 +399,13 @@ def delete_plan(
 
     return {"msg": "Deleted"}
 
+@router.get("/my")
+def my_subscriptions(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    subs = db.query(Subscription).filter(
+        Subscription.user_id == user.id
+    ).all()
+
+    return subs
