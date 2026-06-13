@@ -444,25 +444,25 @@ def my_subscriptions(
         ).first()
 
         result.append({
-            "id": str(s.id),
+              "id": str(s.id),
 
-            "plan": plan.title if plan else "Subscription Plan",
+               "plan": plan.title if plan else "Subscription Plan",
 
-            "chefName": chef.name if chef else "Chef",
+                "plan_type": plan.plan_type if plan else None,
 
-            
+                 "chefName": chef.name if chef else "Chef",
 
-            "startDate": s.start_date.strftime("%b %d, %Y"),
+                 "startDate": s.start_date.strftime("%b %d, %Y"),
 
-            "endDate": s.end_date.strftime("%b %d, %Y"),
+                 "endDate": s.end_date.strftime("%b %d, %Y"),
 
-            "time": s.delivery_time,
+                 "time": s.delivery_time,
 
-            "days": s.delivery_days or [],
+                  "days": s.delivery_days or [],
 
-            "status": s.status,
+                  "status": s.status,
 
-            "price": s.price
-        })
+                 "price": s.price
+               })
 
     return result
