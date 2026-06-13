@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, Boolean
+from sqlalchemy import Column, String, Float, Boolean,Integer
 from sqlalchemy.dialects.postgresql import ARRAY
 from app.db.base import Base
 
@@ -18,6 +18,16 @@ class SubscriptionPlan(Base):
     price = Column(Float, nullable=False)
 
     description = Column(String)
+    
+    goal = Column(String)
+
+    diet_type = Column(String)
+
+    meal_type = Column(ARRAY(String))
+
+    calories_per_day = Column(Integer)
+
+    duration_days = Column(Integer)
     tagline = Column(String)
 
     emoji = Column(String)

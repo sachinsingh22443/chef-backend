@@ -105,7 +105,12 @@ def get_plans(
                 "distance": round(distance, 2),
 
                 "menu_id": str(menu.id),
-                "menu_name": menu.name
+                "menu_name": menu.name,
+                "goal": p.goal,
+                "diet_type": p.diet_type,
+                "meal_type": p.meal_type or [],
+                "calories_per_day": p.calories_per_day,
+                "duration_days": p.duration_days,
             })
 
     # 🔥 SORT BY DISTANCE
@@ -300,7 +305,13 @@ def create_plan(
         emoji=data.get("emoji"),
         color=data.get("color"),
         features=data.get("features", []),
-        includes=data.get("includes", [])
+        includes=data.get("includes", []),
+        goal=data.get("goal"),
+        diet_type=data.get("diet_type"),
+        meal_type=data.get("meal_type", []),
+        calories_per_day=data.get("calories_per_day"),
+        duration_days=data.get("duration_days"),
+        
     )
     
     
@@ -334,6 +345,13 @@ def update_plan(
     plan.tagline = data.get("tagline")
     plan.features = data.get("features", [])
     plan.includes = data.get("includes", [])
+    plan.goal = data.get("goal")
+    plan.diet_type = data.get("diet_type")
+    plan.meal_type = data.get("meal_type", [])
+    plan.calories_per_day = data.get("calories_per_day")
+    plan.duration_days = data.get("duration_days")
+    plan.emoji = data.get("emoji")
+    plan.color = data.get("color")
 
     db.commit()
 
@@ -359,3 +377,4 @@ def delete_plan(
     db.commit()
 
     return {"msg": "Deleted"}
+
