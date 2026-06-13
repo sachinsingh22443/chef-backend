@@ -402,6 +402,27 @@ def delete_plan(
 
     return {"msg": "Deleted"}
 
+
+@router.get("/my-active")
+def my_active_subscription(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    active = db.query(Subscription).filter(
+        Subscription.user_id == user.id,
+        Subscription.status == "active"
+    ).first()
+
+    if not active:
+        return {
+            "has_active_subscription": False
+        }
+
+    return {
+        "has_active_subscription": True,
+        "end_date": active.end_date
+    }
+
 @router.get("/my")
 def my_subscriptions(
     db: Session = Depends(get_db),
