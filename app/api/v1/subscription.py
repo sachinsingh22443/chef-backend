@@ -94,6 +94,7 @@ def get_plans(
                 "id": p.id,
                 "title": p.title,
                 "price": p.price,
+                "plan_type": p.plan_type,
                 "description": p.description,
                 "tagline": p.tagline,
                 "emoji": p.emoji,
@@ -246,7 +247,7 @@ def create_subscription(
 
         customer_name=user.name,
         dish_name=menu.name, 
-
+        # plan_type=data.get("plan_type"),
         plan_id=plan.id,
         price=plan.price,
 
@@ -321,6 +322,7 @@ def create_plan(
         chef_id=user.id,
         title=data["title"],
         price=data["price"],
+        plan_type=data.get("plan_type"),
         description=data.get("description"),
         tagline=data.get("tagline"),
         emoji=data.get("emoji"),
@@ -362,6 +364,7 @@ def update_plan(
 
     plan.title = data["title"]
     plan.price = data["price"]
+    plan.plan_type = data.get("plan_type")
     plan.description = data.get("description")
     plan.tagline = data.get("tagline")
     plan.features = data.get("features", [])

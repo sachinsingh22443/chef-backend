@@ -24,6 +24,7 @@ class SubscriptionPlan(Base):
     diet_type = Column(String)
 
     meal_type = Column(ARRAY(String))
+    plan_type = Column(String)
 
     calories_per_day = Column(Integer)
 
