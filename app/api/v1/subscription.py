@@ -267,3 +267,94 @@ def create_subscription(
         "msg": "Subscription created",
         "id": str(sub.id)
     }
+    
+    
+
+# GET ALL CHEF PLANS
+@router.get("/chef/plans")
+def get_chef_plans(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    plans = db.query(SubscriptionPlan).filter(
+        SubscriptionPlan.chef_id == user.id
+    ).all()
+
+    return plans
+
+# CREATE PLAN
+@router.post("/chef/plans")
+def create_plan(
+    data: dict,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    plan = SubscriptionPlan(
+        id=str(uuid.uuid4()),
+        chef_id=user.id,
+        title=data["title"],
+        price=data["price"],
+        description=data.get("description"),
+        tagline=data.get("tagline"),
+        emoji=data.get("emoji"),
+        color=data.get("color"),
+        features=data.get("features", []),
+        includes=data.get("includes", [])
+    )
+    
+    
+
+    db.add(plan)
+    db.commit()
+
+    return {"msg": "Plan created"}
+
+
+
+# UPDATE PLAN
+@router.put("/chef/plans/{plan_id}")
+def update_plan(
+    plan_id: str,
+    data: dict,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    plan = db.query(SubscriptionPlan).filter(
+        SubscriptionPlan.id == plan_id,
+        SubscriptionPlan.chef_id == user.id
+    ).first()
+
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+
+    plan.title = data["title"]
+    plan.price = data["price"]
+    plan.description = data.get("description")
+    plan.tagline = data.get("tagline")
+    plan.features = data.get("features", [])
+    plan.includes = data.get("includes", [])
+
+    db.commit()
+
+    return {"msg": "Updated"}
+
+
+# DELETE PLAN
+@router.delete("/chef/plans/{plan_id}")
+def delete_plan(
+    plan_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    plan = db.query(SubscriptionPlan).filter(
+        SubscriptionPlan.id == plan_id,
+        SubscriptionPlan.chef_id == user.id
+    ).first()
+
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+
+    db.delete(plan)
+    db.commit()
+
+    return {"msg": "Deleted"}
