@@ -408,4 +408,21 @@ def my_subscriptions(
         Subscription.user_id == user.id
     ).all()
 
-    return subs
+    result = []
+
+    for s in subs:
+        plan = db.query(SubscriptionPlan).filter(
+            SubscriptionPlan.id == s.plan_id
+        ).first()
+
+        result.append({
+            "id": str(s.id),
+            "plan": plan.title if plan else "Subscription Plan",
+            "dish": s.dish_name,
+            "startDate": s.start_date.strftime("%b %d, %Y"),
+            "time": s.delivery_time,
+            "status": s.status,
+            "price": s.price
+        })
+
+    return result
