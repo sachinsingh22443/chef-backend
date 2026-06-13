@@ -193,10 +193,11 @@ def create_order(
                 if not menu:
                     raise HTTPException(status_code=404, detail="Menu not found")
 
-                if menu.quantity < item.quantity:
-                    raise HTTPException(status_code=400, detail="Out of stock")
+                if not data.is_subscription:
+                    if menu.quantity < item.quantity:
+                        raise HTTPException(status_code=400, detail="Out of stock")
 
-                menu.quantity -= item.quantity
+                    menu.quantity -= item.quantity
 
                 if not chef_id:
                     chef_id = menu.chef_id
