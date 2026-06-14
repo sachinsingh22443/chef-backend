@@ -181,10 +181,11 @@ def delete_menu(
     if menu.chef_id != user.id:
         raise HTTPException(status_code=403, detail="Not allowed")
 
-    db.delete(menu)
+    menu.is_available = False
+
     db.commit()
 
-    return {"msg": "Menu deleted"}
+    return {"msg": "Menu deleted successfully"}
 
 
 # ✅ TOP DISHES

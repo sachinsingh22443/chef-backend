@@ -283,6 +283,7 @@ def create_subscription(
         title="New Subscription Received 🍱",
         message=f"{user.name} subscribed to your {plan.title} plan."
         )
+        
 
         db.add(customer_notification)
         db.add(chef_notification)
