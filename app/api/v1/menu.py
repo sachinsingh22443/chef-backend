@@ -87,6 +87,8 @@ async def update_menu(
     name: str = Form(None),
     description: str = Form(None),
     price: float = Form(None),
+    is_available: bool = Form(None),
+
     prep_time: int = Form(None),
     quantity: int = Form(None),
     category: str = Form(None),
@@ -126,7 +128,8 @@ async def update_menu(
         menu.category = category
     if food_type:
         menu.food_type = food_type
-
+    if is_available is not None:
+        menu.is_available = is_available
     if calories:
         menu.calories = calories
     if protein:
@@ -487,3 +490,27 @@ def search_chefs(
     results.sort(key=lambda x: x["distance"])
 
     return results
+
+
+@router.put("/{menu_id}/availability")
+def toggle_menu(
+    menu_id: str,
+    is_available: bool,
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    menu = db.query(Menu).filter(
+        Menu.id == menu_id
+    ).first()
+
+    if not menu:
+        raise HTTPException(404, "Menu not found")
+
+    menu.is_available = is_available
+
+    db.commit()
+
+    return {
+        "success": True,
+        "is_available": menu.is_available
+    }
