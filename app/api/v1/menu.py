@@ -505,6 +505,12 @@ def toggle_menu(
 
     if not menu:
         raise HTTPException(404, "Menu not found")
+    
+    if menu.chef_id != user.id:
+        raise HTTPException(
+        status_code=403,
+        detail="Not allowed"
+        )
 
     menu.is_available = is_available
 
