@@ -520,3 +520,13 @@ def toggle_menu(
         "success": True,
         "is_available": menu.is_available
     }
+    
+    
+@router.get("/my")
+def get_my_menus(
+    db: Session = Depends(get_db),
+    user = Depends(get_current_user)
+):
+    return db.query(Menu).filter(
+        Menu.chef_id == user.id
+    ).all()
