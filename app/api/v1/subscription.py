@@ -141,8 +141,8 @@ def get_subscriptions(
         result.append({
             "id": str(s.id),
             "customer": s.customer_name,
+            "plan_type": plan.plan_type if plan else None,
             "plan": plan.title if plan else s.plan_id,
-            "dish": s.dish_name,
             "quantity": s.meals_per_day,
             "startDate": s.start_date.strftime("%b %d, %Y"),
             "days": s.delivery_days or [],
