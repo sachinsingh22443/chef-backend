@@ -247,12 +247,20 @@ def get_chef_with_menu(
     chef_id: UUID,
     db: Session = Depends(get_db)
 ):
-    chef = db.query(User).filter(User.id == chef_id).first()
+    chef = db.query(User).filter(
+        User.id == chef_id
+    ).first()
 
     if not chef:
-        raise HTTPException(status_code=404, detail="Chef not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Chef not found"
+        )
 
-    menus = db.query(Menu).filter(Menu.chef_id == chef_id).all()
+    menus = db.query(Menu).filter(
+        Menu.chef_id == chef_id,
+        Menu.is_available == True
+    ).all()
 
     return {
         "chef": {
@@ -265,7 +273,6 @@ def get_chef_with_menu(
         },
         "menus": menus
     }
-    
     
 # get all chefs 
 @router.get("/chefs")
