@@ -183,8 +183,9 @@ def delete_menu(
 
     if menu.chef_id != user.id:
         raise HTTPException(status_code=403, detail="Not allowed")
-
+    menu.is_deleted = True
     menu.is_available = False
+    
 
     db.commit()
 
@@ -222,7 +223,11 @@ def get_menus(
     max_price: Optional[float] = Query(None),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Menu).filter(Menu.is_available == True)
+    query = db.query(Menu).filter
+    (Menu.is_available == True,
+     Menu.is_deleted == False
+                                  
+    )
 
     if category:
         query = query.filter(Menu.category == category)
@@ -535,5 +540,6 @@ def get_my_menus(
     user = Depends(get_current_user)
 ):
     return db.query(Menu).filter(
-        Menu.chef_id == user.id
+        Menu.chef_id == user.id,
+        Menu.is_deleted == False
     ).all()

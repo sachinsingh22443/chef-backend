@@ -30,3 +30,4 @@ class Menu(Base):
     image_urls = Column(ARRAY(String))
 
     is_available = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)
