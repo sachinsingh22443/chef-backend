@@ -1,8 +1,11 @@
-from sqlalchemy import Column, String, ForeignKey,Float
+from sqlalchemy import Column, String, ForeignKey, Float, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from sqlalchemy.dialects.postgresql import UUID
+from datetime import datetime
+from sqlalchemy import DateTime
 
 from app.db.base import Base
 
@@ -29,20 +32,10 @@ class ChefProfile(Base):
     location = Column(String)
     specialties = Column(String)
     
-from sqlalchemy import Column, String, Boolean
-from sqlalchemy.dialects.postgresql import UUID
-import uuid
 
-from app.db.base import Base
 
-from sqlalchemy import Column, String, Boolean
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-import uuid
 
-from app.db.base import Base
-from datetime import datetime
-from sqlalchemy import DateTime
+
 class User(Base):
     __tablename__ = "users"
 
@@ -64,4 +57,9 @@ class User(Base):
 
     # ✅ YAHI PAR HOGA
     chef_profile = relationship("ChefProfile", backref="user", uselist=False)
+    refresh_tokens = relationship(
+    "RefreshToken",
+    back_populates = "user",
+    cascade = "all, delete-orphan"
+)
     

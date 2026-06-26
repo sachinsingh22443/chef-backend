@@ -2,19 +2,32 @@ import random
 import time
 import requests
 import uuid
-
+from app.schemas.auth import RefreshTokenSchema
+from app.core.security import verify_refresh_token
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from pydantic import BaseModel
 from app.api.deps import get_db, get_current_user
 from app.models.user import User
-from app.utils.hashing import hash_password, verify_password
 
-from app.core.security import create_access_token
 from app.services.msg91 import send_otp, verify_otp
 
-from app.schemas.auth import CustomerLoginSchema,CustomerSignupSchema,CustomerForgotPasswordSchema,CustomerResetPasswordSchema,ChangePasswordSchema
+from app.schemas.auth import CustomerLoginSchema, CustomerSignupSchema, CustomerForgotPasswordSchema, CustomerResetPasswordSchema, ChangePasswordSchema
+from app.core.security import (
+    create_access_token,
+    create_refresh_token
+)
+
+from app.models.refresh_token import RefreshToken
+
+from app.utils.hashing import (
+    hash_password,
+    verify_password,
+    hash_refresh_token
+)
+
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
@@ -74,15 +87,30 @@ def signupapi(data: CustomerSignupSchema, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    token = create_access_token({
-        "sub": str(user.id),
-        "role": user.role
+    access_token = create_access_token({
+      "sub": str(user.id),
+      "role": user.role
     })
 
+    refresh_token = create_refresh_token({
+       "sub": str(user.id)
+    })
+
+    db_token = RefreshToken(
+       user_id=user.id,
+       token_hash=hash_refresh_token(refresh_token),
+       expires_at=datetime.utcnow() + timedelta(days=365)
+       )
+
+    db.add(db_token)
+    db.commit()
+
     return {
-        "access_token": token,
+       "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
         "user_id": str(user.id)
-    }
+        }
 
 
 # LOGIN
@@ -101,15 +129,29 @@ def loginapi(data: CustomerLoginSchema, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid password")
 
     # 🔥 TOKEN CREATE
-    token = create_access_token({
+    access_token = create_access_token({
         "sub": str(user.id),
         "role": user.role
     })
 
+    refresh_token = create_refresh_token({
+       "sub": str(user.id)
+    })
+
+    db_token = RefreshToken(
+       user_id=user.id,
+       token_hash=hash_refresh_token(refresh_token),
+       expires_at=datetime.utcnow() + timedelta(days=365)
+    )
+
+    db.add(db_token)
+    db.commit()
+
     return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user_id": str(user.id)
+      "access_token": access_token,
+       "refresh_token": refresh_token,
+       "token_type": "bearer",
+       "user_id": str(user.id)
     }
 # FORGOT PASSWORD
 # FORGOT PASSWORD
@@ -174,6 +216,89 @@ def change(
 @router.get("/verify-token")
 def verify_token(current_user=Depends(get_current_user)):
     return {"valid": True}
+
+
+
+@router.post("/refresh-token")
+def refresh_access_token(
+    data: RefreshTokenSchema,
+    db: Session = Depends(get_db)
+):
+    # Verify JWT
+    payload = verify_refresh_token(data.refresh_token)
+
+    user_id = payload.get("sub")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid refresh token"
+        )
+
+    # Hash token
+    token_hash = hash_refresh_token(data.refresh_token)
+
+    # Find in DB
+    db_token = db.query(RefreshToken).filter(
+        RefreshToken.token_hash == token_hash,
+        RefreshToken.is_revoked == False
+    ).first()
+
+    if not db_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token not found"
+        )
+
+    # Check expiry
+    if db_token.expires_at < datetime.utcnow():
+        db_token.is_revoked = True
+        db.commit()
+
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token expired"
+        )
+
+    # Get User
+    user = db.query(User).filter(
+        User.id == user_id
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
+    # Revoke old token (Rotation)
+    db_token.is_revoked = True
+
+    # Create new tokens
+    access_token = create_access_token({
+        "sub": str(user.id),
+        "role": user.role
+    })
+
+    refresh_token = create_refresh_token({
+        "sub": str(user.id)
+    })
+
+    # Save new refresh token
+    new_token = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(refresh_token),
+        expires_at=datetime.utcnow() + timedelta(days=365)
+    )
+
+    db.add(new_token)
+    db.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
 
 # DELETE ACCOUNT
 @router.delete("/delete-account")

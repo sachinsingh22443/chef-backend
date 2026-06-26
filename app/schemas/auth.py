@@ -40,6 +40,9 @@ class CustomerResetPasswordSchema(BaseModel):
     phone: str
     otp: str
     new_password: str = Field(min_length=6)
+    
+class RefreshTokenSchema(BaseModel):
+    refresh_token: str
 
 
 # =========================

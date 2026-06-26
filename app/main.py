@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.session import engine
 from app.db.base import Base
-
+from app.models.refresh_token import RefreshToken
 from app.api.v1 import send_otp
 # 🔹 Models (important for table creation)
 
