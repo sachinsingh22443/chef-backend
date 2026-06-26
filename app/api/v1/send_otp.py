@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from app.api.deps import get_db, get_current_user
 from app.models.user import User
 
+
 from app.services.msg91 import send_otp, verify_otp
 
 from app.schemas.auth import CustomerLoginSchema, CustomerSignupSchema, CustomerForgotPasswordSchema, CustomerResetPasswordSchema, ChangePasswordSchema
@@ -26,6 +27,17 @@ from app.utils.hashing import (
     verify_password,
     hash_refresh_token
 )
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    verify_refresh_token
+)
+
+from app.models.refresh_token import RefreshToken
+
+from app.utils.hashing import hash_refresh_token
+
+from pydantic import BaseModel
 
 from datetime import datetime, timedelta
 
@@ -213,6 +225,55 @@ def change(
 
     return {"message": "Password changed successfully"}
 
+
+@router.post("/refresh")
+def refresh_access_token(
+    data: RefreshTokenSchema,
+    db: Session = Depends(get_db)
+):
+    payload = verify_refresh_token(data.refresh_token)
+
+    token_hash = hash_refresh_token(data.refresh_token)
+
+    db_token = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.token_hash == token_hash,
+            RefreshToken.is_revoked == False
+        )
+        .first()
+    )
+
+    if not db_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid refresh token"
+        )
+
+    if db_token.expires_at < datetime.utcnow():
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token expired"
+        )
+
+    user = db.query(User).filter(
+        User.id == payload["sub"]
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
+    access_token = create_access_token({
+        "sub": str(user.id),
+        "role": user.role
+    })
+
+    return {
+        "access_token": access_token
+    }
 @router.get("/verify-token")
 def verify_token(current_user=Depends(get_current_user)):
     return {"valid": True}
