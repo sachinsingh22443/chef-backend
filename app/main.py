@@ -1,4 +1,3 @@
-from contextlib import asynccontextmanager
 import os
 
 from dotenv import load_dotenv
@@ -44,33 +43,13 @@ load_dotenv(env_path)
 
 
 # ==========================
-# Lifespan
-# ==========================
-
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     print("🚀 Chef Backend Starting...")
-
-#     try:
-#         Base.metadata.create_all(bind=engine)
-#         print("✅ Database Connected")
-#     except Exception as e:
-#         print("❌ Database Error:", e)
-
-#     yield
-
-#     print("🛑 Chef Backend Shutdown")
-
-
-# ==========================
 # App
 # ==========================
 
 app = FastAPI(
     title="Chef Backend API",
     version="1.0.0",
-    default_response_class=ORJSONResponse,
-    lifespan=lifespan,
+    default_response_class=ORJSONResponse
 )
 
 
@@ -137,4 +116,3 @@ async def root():
         "status": "success",
         "message": "Chef Backend Running 🚀"
     }
-    
