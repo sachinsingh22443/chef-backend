@@ -127,6 +127,9 @@ async def health():
 # ==========================
 # Root
 # ==========================
+@app.get("/ping")
+async def ping():
+    return {"status": "alive"}
 
 @app.get("/")
 async def root():
@@ -134,3 +137,4 @@ async def root():
         "status": "success",
         "message": "Chef Backend Running 🚀"
     }
+    
