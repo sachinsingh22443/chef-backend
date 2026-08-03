@@ -47,19 +47,19 @@ load_dotenv(env_path)
 # Lifespan
 # ==========================
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🚀 Chef Backend Starting...")
+# @asynccontextmanager
+# async def lifespan(app: FastAPI):
+#     print("🚀 Chef Backend Starting...")
 
-    try:
-        Base.metadata.create_all(bind=engine)
-        print("✅ Database Connected")
-    except Exception as e:
-        print("❌ Database Error:", e)
+#     try:
+#         Base.metadata.create_all(bind=engine)
+#         print("✅ Database Connected")
+#     except Exception as e:
+#         print("❌ Database Error:", e)
 
-    yield
+#     yield
 
-    print("🛑 Chef Backend Shutdown")
+#     print("🛑 Chef Backend Shutdown")
 
 
 # ==========================
