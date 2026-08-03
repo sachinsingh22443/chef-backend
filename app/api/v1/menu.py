@@ -1,8 +1,11 @@
+from app.core.cache import get_cache, set_cache
+from app.core.cache import delete_cache
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, Form, File
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from typing import Optional, List
 import cloudinary.uploader
-
+from app.models.user import User
+from uuid import UUID
 from app.models.menu import Menu
 from app.models.order_item import OrderItem
 from app.api.deps import get_db, get_current_user
@@ -41,8 +44,18 @@ async def create_menu(
                 contents = await img.read()   # 🔥 IMPORTANT FIX
 
                 result = cloudinary.uploader.upload(
-                    contents,
-                    folder="menu_items"
+                   contents,
+                   folder="menu_items",
+                   resource_type="image",
+                   quality="auto",
+                   fetch_format="auto",
+                   transformation=[
+                    {
+                     "width": 800,
+                     "height": 800,
+                     "crop": "limit"
+                    }
+                    ]
                 )
 
                 image_urls.append(result["secure_url"])
@@ -75,6 +88,7 @@ async def create_menu(
 
     db.add(menu)
     db.commit()
+    delete_cache(f"menu:{user.id}")
     db.refresh(menu)
 
     return menu
@@ -151,8 +165,18 @@ async def update_menu(
                 contents = await img.read()
 
                 result = cloudinary.uploader.upload(
-                    contents,
-                    folder="menu_items"
+                   contents,
+                   folder="menu_items",
+                   resource_type="image",
+                   quality="auto",
+                   fetch_format="auto",
+                   transformation=[
+                    {
+                     "width": 800,
+                     "height": 800,
+                     "crop": "limit"
+                    }
+                    ]
                 )
 
                 image_urls.append(result["secure_url"])
@@ -164,6 +188,7 @@ async def update_menu(
         menu.image_urls = image_urls
 
     db.commit()
+    delete_cache(f"menu:{user.id}")
     db.refresh(menu)
 
     return {"msg": "Menu updated", "images": menu.image_urls}
@@ -174,9 +199,12 @@ async def update_menu(
 def delete_menu(
     menu_id: str,
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user)
 ):
-    menu = db.query(Menu).filter(Menu.id == menu_id).first()
+    menu = db.query(Menu).filter(
+     Menu.id == menu_id,
+     Menu.is_deleted == False
+    ).first()
 
     if not menu:
         raise HTTPException(status_code=404, detail="Menu not found")
@@ -188,7 +216,7 @@ def delete_menu(
     
 
     db.commit()
-
+    delete_cache(f"menu:{user.id}")
     return {"msg": "Menu deleted successfully"}
 
 
@@ -221,12 +249,18 @@ def get_menus(
     food_type: Optional[str] = Query(None),
     min_price: Optional[float] = Query(None),
     max_price: Optional[float] = Query(None),
-    db: Session = Depends(get_db)
+
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+
+    db: Session = Depends(get_db),
 ):
-    query = db.query(Menu).filter
-    (Menu.is_available == True,
-     Menu.is_deleted == False
-                                  
+    query = (
+        db.query(Menu)
+        .filter(
+            Menu.is_available == True,
+            Menu.is_deleted == False,
+        )
     )
 
     if category:
@@ -235,26 +269,52 @@ def get_menus(
     if food_type:
         query = query.filter(Menu.food_type == food_type)
 
-    if min_price:
+    if min_price is not None:
         query = query.filter(Menu.price >= min_price)
 
-    if max_price:
+    if max_price is not None:
         query = query.filter(Menu.price <= max_price)
 
-    return query.all()
+    menus = (
+        query
+        .order_by(Menu.name.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
-from uuid import UUID
-from app.models.user import User
-from uuid import UUID
+    return menus
+
+
 
 @router.get("/chef/{chef_id}")
 def get_chef_with_menu(
     chef_id: UUID,
     db: Session = Depends(get_db)
 ):
-    chef = db.query(User).filter(
-        User.id == chef_id
-    ).first()
+    # =========================
+    # Redis Cache
+    # =========================
+    cache_key = f"menu:{chef_id}"
+
+    cached = get_cache(cache_key)
+
+    if cached:
+        print("✅ Chef Menu Cache Hit")
+        return cached
+
+    # =========================
+    # Chef
+    # =========================
+    chef = (
+        db.query(User)
+        .options(selectinload(User.chef_profile))
+        .filter(
+            User.id == chef_id,
+            User.role == "chef"
+        )
+        .first()
+    )
 
     if not chef:
         raise HTTPException(
@@ -262,38 +322,96 @@ def get_chef_with_menu(
             detail="Chef not found"
         )
 
-    menus = db.query(Menu).filter(
-        Menu.chef_id == chef_id,
-        Menu.is_available == True
-    ).all()
+    # =========================
+    # Menus
+    # =========================
+    menus = (
+        db.query(Menu)
+        .filter(
+            Menu.chef_id == chef_id,
+            Menu.is_available == True,
+            Menu.is_deleted == False
+        )
+        .order_by(Menu.name.asc())
+        .all()
+    )
 
-    return {
+    # =========================
+    # JSON Serializable Menu
+    # =========================
+    menu_data = []
+
+    for menu in menus:
+        menu_data.append({
+            "id": str(menu.id),
+            "chef_id": str(menu.chef_id),
+            "name": menu.name,
+            "description": menu.description,
+            "price": menu.price,
+            "prep_time": menu.prep_time,
+            "quantity": menu.quantity,
+            "category": menu.category,
+            "food_type": menu.food_type,
+            "calories": menu.calories,
+            "protein": menu.protein,
+            "carbs": menu.carbs,
+            "fats": menu.fats,
+            "ingredients": menu.ingredients,
+            "image_urls": menu.image_urls,
+            "is_available": menu.is_available
+        })
+
+    # =========================
+    # Response
+    # =========================
+    response = {
         "chef": {
-            "id": chef.id,
+            "id": str(chef.id),
             "name": chef.name,
             "bio": chef.chef_profile.bio if chef.chef_profile else None,
             "location": chef.chef_profile.location if chef.chef_profile else None,
             "specialties": chef.chef_profile.specialties if chef.chef_profile else None,
-            "profile_image": chef.chef_profile.profile_image if chef.chef_profile else None
+            "profile_image": chef.chef_profile.profile_image if chef.chef_profile else None,
         },
-        "menus": menus
+        "menus": menu_data
     }
+
+    # =========================
+    # Save Cache
+    # =========================
+    set_cache(cache_key, response, ttl=300)
+
+    return response
     
 # get all chefs 
+
 @router.get("/chefs")
 def get_all_chefs(db: Session = Depends(get_db)):
-    chefs = db.query(User).filter(User.role == "chef").all()
+    chefs = (
+        db.query(User)
+        .options(selectinload(User.chef_profile))
+        .filter(User.role == "chef")
+        .order_by(User.name.asc())
+        .all()
+    )
 
     return [
         {
-            "id": str(c.id),  # 🔥 UUID string
-            "name": c.name,
-            "profile_image": c.chef_profile.profile_image if c.chef_profile else None,
-            "specialties": c.chef_profile.specialties if c.chef_profile else None
+            "id": str(chef.id),
+            "name": chef.name,
+            "profile_image": (
+                chef.chef_profile.profile_image
+                if chef.chef_profile
+                else None
+            ),
+            "specialties": (
+                chef.chef_profile.specialties
+                if chef.chef_profile
+                else None
+            ),
         }
-        for c in chefs
+        for chef in chefs
     ]
-    
     
     
 from math import radians, cos, sin, asin, sqrt
@@ -314,6 +432,8 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 
 # 🔥 MAIN API
+from sqlalchemy.orm import selectinload
+
 @router.get("/nearby-chefs")
 def get_nearby_chefs(
     lat: float,
@@ -321,64 +441,97 @@ def get_nearby_chefs(
     category: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    chefs = db.query(User).filter(User.role == "chef").all()
+    
+    cache_key = f"nearby:{round(lat,2)}:{round(lng,2)}:{category or 'all'}"
+
+    cached = get_cache(cache_key)
+
+    if cached:
+      print("✅ Nearby Cache Hit")
+      return cached
+    # Chef Profile ko ek hi batch me load karo
+    chefs = (
+        db.query(User)
+        .options(selectinload(User.chef_profile))
+        .filter(User.role == "chef")
+        .all()
+    )
+
+    chef_ids = [chef.id for chef in chefs]
+
+    # Sab menus ek hi query me
+    menus_query = db.query(Menu).filter(
+        Menu.chef_id.in_(chef_ids),
+        Menu.is_available == True,
+        Menu.is_deleted == False,
+    )
+
+    if category:
+        menus_query = menus_query.filter(
+            func.lower(Menu.category) == category.lower()
+        )
+
+    all_menus = menus_query.all()
+
+    # Chef wise menu map
+    menu_map = {}
+
+    for menu in all_menus:
+        menu_map.setdefault(menu.chef_id, []).append(menu)
 
     nearby_chefs = []
 
     for chef in chefs:
+
         profile = chef.chef_profile
 
-        # ❌ skip invalid profiles
         if not profile:
             continue
 
         if profile.latitude is None or profile.longitude is None:
             continue
 
-        # 🔥 DISTANCE CALCULATION
         distance = calculate_distance(
             lat,
             lng,
             profile.latitude,
-            profile.longitude
+            profile.longitude,
         )
 
-        # ❌ skip >10km
         if distance > 50:
             continue
 
-        # 🔥 MENU QUERY
-        menus_query = db.query(Menu).filter(
-            Menu.chef_id == chef.id,
-            Menu.is_available == True
-        )
+        menus = menu_map.get(chef.id, [])
 
-        # 🔥 CATEGORY FILTER (FINAL FIX)
-        if category:
-            menus_query = menus_query.filter(
-                func.lower(Menu.category).contains(category.lower())
-            )
+        menu_data = []
 
-        menus = menus_query.all()
-
-        # ❌ अगर menu नहीं → chef skip
-        if len(menus) == 0:
-            continue
+        for menu in menus:
+            menu_data.append({
+             "id": str(menu.id),
+             "name": menu.name,
+             "price": menu.price,
+             "category": menu.category,
+             "food_type": menu.food_type,
+             "prep_time": menu.prep_time,
+             "quantity": menu.quantity,
+             "image_urls": menu.image_urls,
+             "is_available": menu.is_available,
+            })
 
         nearby_chefs.append({
-            "id": str(chef.id),
-            "name": chef.name,
-            "profile_image": profile.profile_image,
-            "specialties": profile.specialties,
-            "distance": round(distance, 2),
-            "menus": menus
-        })
+           "id": str(chef.id),
+           "name": chef.name,
+           "profile_image": profile.profile_image,
+           "specialties": profile.specialties,
+           "distance": round(distance, 2),
+           "menus": menu_data,
+          })
 
-    # 🔥 sort by distance
     nearby_chefs.sort(key=lambda x: x["distance"])
 
-    return nearby_chefs
+    set_cache(cache_key, nearby_chefs, ttl=120)
 
+    return nearby_chefs
 
 # set location
 from app.models.user import ChefProfile, User
@@ -461,11 +614,18 @@ def search_chefs(
     lng: float,
     db: Session = Depends(get_db)
 ):
-    chefs = db.query(User).filter(User.role == "chef").all()
+    chefs = (
+        db.query(User)
+        .options(selectinload(User.chef_profile))
+        .filter(User.role == "chef")
+        .order_by(User.name.asc())
+        .all()
+    )
 
     results = []
 
     for chef in chefs:
+
         profile = chef.chef_profile
 
         if not profile:
@@ -474,7 +634,6 @@ def search_chefs(
         if profile.latitude is None or profile.longitude is None:
             continue
 
-        # 🔥 distance
         distance = calculate_distance(
             lat,
             lng,
@@ -482,13 +641,15 @@ def search_chefs(
             profile.longitude
         )
 
-        # 🔥 10km filter
         if distance > 10:
             continue
 
-        # 🔥 search match (name + specialties)
-        if query.lower() in chef.name.lower() or (
-            profile.specialties and query.lower() in profile.specialties.lower()
+        if (
+            query.lower() in chef.name.lower()
+            or (
+                profile.specialties
+                and query.lower() in profile.specialties.lower()
+            )
         ):
             results.append({
                 "id": str(chef.id),
@@ -498,7 +659,6 @@ def search_chefs(
                 "distance": round(distance, 2)
             })
 
-    # 🔥 sort by distance
     results.sort(key=lambda x: x["distance"])
 
     return results
@@ -509,10 +669,11 @@ def toggle_menu(
     menu_id: str,
     is_available: bool,
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user)
 ):
     menu = db.query(Menu).filter(
-        Menu.id == menu_id
+     Menu.id == menu_id,
+     Menu.is_deleted == False
     ).first()
 
     if not menu:
@@ -527,7 +688,7 @@ def toggle_menu(
     menu.is_available = is_available
 
     db.commit()
-
+    delete_cache(f"menu:{user.id}")
     return {
         "success": True,
         "is_available": menu.is_available
@@ -537,9 +698,14 @@ def toggle_menu(
 @router.get("/my")
 def get_my_menus(
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user)
 ):
-    return db.query(Menu).filter(
-        Menu.chef_id == user.id,
-        Menu.is_deleted == False
-    ).all()
+    return (
+        db.query(Menu)
+        .filter(
+            Menu.chef_id == user.id,
+            Menu.is_deleted == False
+        )
+        .order_by(Menu.name.asc())
+        .all()
+    )

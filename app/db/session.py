@@ -9,14 +9,29 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
+
+    # Neon PostgreSQL
     connect_args={
         "sslmode": "require"
-    }
+    },
+
+    # Connection Pool
+    pool_pre_ping=True,
+    pool_recycle=1800,      # Recycle every 30 min
+    pool_size=10,           # Safe for Neon
+    max_overflow=20,        # Extra temporary connections
+    pool_timeout=30,        # Wait max 30 sec
+
+    # SQLAlchemy 2.x
+    future=True,
+
+    # Disable SQL logs in production
+    echo=False
 )
 
 SessionLocal = sessionmaker(
+    bind=engine,
     autocommit=False,
     autoflush=False,
-    bind=engine
+    expire_on_commit=False,
 )

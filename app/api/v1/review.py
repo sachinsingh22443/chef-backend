@@ -1,3 +1,4 @@
+from app.core.cache import delete_cache
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -38,7 +39,7 @@ def create_review(
 
     # ✅ SINGLE COMMIT
     db.commit()
-
+    delete_cache(f"dashboard:{data.chef_id}")
     return {"msg": "Review added"}
 
 

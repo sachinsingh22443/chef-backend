@@ -12,7 +12,7 @@ router = APIRouter()
 @router.get("/me")
 def get_profile(
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ):
     chef = current_user.chef_profile
 
@@ -20,24 +20,36 @@ def get_profile(
     # 🔥 ROLE BASED ORDERS
     # =========================
     if current_user.role == "chef":
-        total_orders = db.query(Order)\
-            .filter(Order.chef_id == current_user.id)\
-            .count()
+        total_orders = (
+          db.query(func.count(Order.id))
+          .filter(
+            Order.chef_id == current_user.id,
+            Order.status != "cancelled"
+           )
+          .scalar() or 0
+          )
     else:
-        total_orders = db.query(Order)\
-            .filter(Order.user_id == current_user.id)\
-            .count()
+        total_orders = (
+           db.query(func.count(Order.id))
+           .filter(
+            Order.user_id == current_user.id,
+            Order.status != "cancelled"
+            )
+             .scalar() or 0
+            )
 
     # =========================
     # ⭐ RATING (ONLY CHEF)
     # =========================
     avg_rating = 0
     if current_user.role == "chef":
-        avg_rating = db.query(func.avg(Review.rating))\
-            .filter(Review.chef_id == current_user.id)\
-            .scalar()
+        avg_rating = (
+          db.query(func.avg(Review.rating))
+          .filter(Review.chef_id == current_user.id)
+          .scalar() or 0
+        )
 
-        avg_rating = round(avg_rating, 1) if avg_rating else 0
+        avg_rating = round(avg_rating, 1)
 
     # =========================
     # 🖼 PROFILE IMAGE FIX

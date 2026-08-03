@@ -1,9 +1,15 @@
-# app/models/notification.py
-
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
-from datetime import datetime
 import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    Column,
+    String,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+)
+from sqlalchemy.dialects.postgresql import UUID
 
 from app.db.base import Base
 
@@ -11,17 +17,60 @@ from app.db.base import Base
 class Notification(Base):
     __tablename__ = "notifications"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    __table_args__ = (
+        Index(
+            "idx_notification_user_created",
+            "user_id",
+            "created_at",
+        ),
+        Index(
+            "idx_notification_user_read",
+            "user_id",
+            "is_read",
+        ),
+    )
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
 
-    type = Column(String, nullable=False)  # order, payment, review, system, offer
-    title = Column(String, nullable=False)
-    message = Column(String, nullable=False)
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
 
-    is_read = Column(Boolean, default=False)
+    type = Column(
+        String,
+        nullable=False,
+    )
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    title = Column(
+        String,
+        nullable=False,
+    )
 
-    # 🔥 optional (future use)
-    action_url = Column(String, nullable=True)
+    message = Column(
+        String,
+        nullable=False,
+    )
+
+    is_read = Column(
+        Boolean,
+        default=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        index=True,
+    )
+
+    action_url = Column(
+        String,
+        nullable=True,
+    )

@@ -1,8 +1,17 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
 import uuid
+
+from sqlalchemy import (
+    Column,
+    String,
+    Integer,
+    Float,
+    DateTime,
+    ForeignKey,
+    Index,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from app.db.base import Base
 
@@ -10,33 +19,85 @@ from app.db.base import Base
 class TomorrowSpecial(Base):
     __tablename__ = "tomorrow_specials"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    __table_args__ = (
+        Index(
+            "idx_special_chef_active",
+            "chef_id",
+            "is_active",
+        ),
+        Index(
+            "idx_special_food_active",
+            "food_type",
+            "is_active",
+        ),
+        Index(
+            "idx_special_created",
+            "created_at",
+        ),
+    )
 
-    chef_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    chef_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
 
     # 🍽️ Dish
-    dish_name = Column(String)
+    dish_name = Column(
+        String,
+        nullable=False,
+        index=True,
+    )
+
     description = Column(String)
 
     # 💰 Pricing
-    price = Column(Float)
+    price = Column(Float, nullable=False)
 
     # 📦 Quantity
-    max_plates = Column(Integer)
-    pre_orders = Column(Integer, default=0)   # 🔥 NEW
+    max_plates = Column(Integer, nullable=False)
+
+    pre_orders = Column(
+        Integer,
+        default=0,
+    )
 
     # ⏰ Timing
-    cutoff_time = Column(String)  # HH:MM
+    cutoff_time = Column(String)
 
     # 🖼️ Image
     image_url = Column(String, nullable=True)
 
     # 📊 Status
-    is_active = Column(Integer, default=1)  # 1 = active, 0 = sold out  🔥 NEW
+    is_active = Column(
+        Integer,
+        default=1,
+        index=True,
+    )
+
+    # 🌱 Food Type
+    food_type = Column(
+        String,
+        default="veg",
+        index=True,
+    )
 
     # 🕒 Created
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        index=True,
+    )
 
     # 🔗 Relationship
-    chef = relationship("User")
-    food_type = Column(String, default="veg")  # veg / non_veg
+    chef = relationship(
+        "User",
+        lazy="selectin",
+    )

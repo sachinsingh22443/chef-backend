@@ -1,12 +1,8 @@
-import random
-import time
-import requests
-import uuid
+
 from app.schemas.auth import RefreshTokenSchema
 from app.core.security import verify_refresh_token
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.api.deps import get_db
 from pydantic import BaseModel
 from app.api.deps import get_db, get_current_user
 from app.models.user import User
@@ -20,7 +16,6 @@ from app.core.security import (
     create_refresh_token
 )
 
-from app.models.refresh_token import RefreshToken
 
 from app.utils.hashing import (
     hash_password,
@@ -35,19 +30,14 @@ from app.core.security import (
 
 from app.models.refresh_token import RefreshToken
 
-from app.utils.hashing import hash_refresh_token
 
-from pydantic import BaseModel
 
 from datetime import datetime, timedelta
 
 router = APIRouter()
 
 
-from pydantic import BaseModel
 
-from pydantic import BaseModel
-from fastapi import HTTPException
 
 class SendOtpSchema(BaseModel):
     phone: str
@@ -82,7 +72,12 @@ def signupapi(data: CustomerSignupSchema, db: Session = Depends(get_db)):
     if otp_check.get("type") != "success":
         raise HTTPException(400, "Invalid OTP")
 
-    existing = db.query(User).filter(User.phone == data.phone).first()
+    existing = (
+      db.query(User)
+      .filter(User.phone == data.phone)
+      .limit(1)
+      .first()
+    )
     if existing:
         raise HTTPException(400, "User already exists")
 
@@ -132,7 +127,12 @@ def signupapi(data: CustomerSignupSchema, db: Session = Depends(get_db)):
 @router.post("/loginapi")
 def loginapi(data: CustomerLoginSchema, db: Session = Depends(get_db)):
 
-    user = db.query(User).filter(User.phone == data.phone).first()
+    user = (
+      db.query(User)
+      .filter(User.phone == data.phone)
+      .limit(1)
+      .first()
+    )
 
     if not user:
         raise HTTPException(status_code=400, detail="User not found")
@@ -192,7 +192,12 @@ def reset(data: CustomerResetPasswordSchema, db: Session = Depends(get_db)):
     if otp_check.get("type") != "success":
         raise HTTPException(400, "Invalid OTP")
 
-    user = db.query(User).filter(User.phone == data.phone).first()
+    user = (
+     db.query(User)
+     .filter(User.phone == data.phone)
+     .limit(1)
+     .first()
+    )
     if not user:
         raise HTTPException(404, "User not found")
 
@@ -241,6 +246,7 @@ def refresh_access_token(
             RefreshToken.token_hash == token_hash,
             RefreshToken.is_revoked == False
         )
+        .limit(1)
         .first()
     )
 
@@ -370,7 +376,7 @@ def delete(
     if not user:
         raise HTTPException(404, "User not found")
 
-    db.delete(user)
+    user.is_active = False
     db.commit()
 
     return {"message": "Account deleted"}

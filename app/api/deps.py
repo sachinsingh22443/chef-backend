@@ -22,10 +22,21 @@ def get_current_user(
     payload = verify_token(token)
     user_id = payload.get("sub")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    user = (
+      db.query(User)
+      .filter(User.id == user_id)
+      .limit(1)
+      .first()
+    )
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    if not user.is_active:
+        raise HTTPException(
+          status_code=403,
+          detail="Account is inactive"
+        )
 
     return user
 

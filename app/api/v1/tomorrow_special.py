@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session, joinedload
 import cloudinary.uploader
 from datetime import datetime
-
+import logging
 from app.api.deps import get_db, get_current_user
 from app.models.tomorrow_special import TomorrowSpecial
 from app.models.user import User
@@ -10,7 +10,7 @@ from app.schemas.tomorrow_special import PreOrderCreate
 
 router = APIRouter(prefix="/tomorrow-special", tags=["Tomorrow Special"])
 
-
+logger = logging.getLogger(__name__)
 # =============================
 # ✅ CREATE
 # =============================
@@ -25,8 +25,13 @@ async def create_special(
     food_type: str = Form(...), 
 
     db: Session = Depends(get_db),
-    user = Depends(get_current_user),
+    user=Depends(get_current_user),
 ):
+    if user.role != "chef":
+        raise HTTPException(
+         status_code=403,
+         detail="Only chefs can create tomorrow specials"
+        )
     image_url = None
 
     if image:
@@ -40,8 +45,13 @@ async def create_special(
 
             image_url = result["secure_url"]
 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Image upload failed")
+        except Exception:
+            logger.exception("Tomorrow special image upload failed")
+
+            raise HTTPException(
+               status_code=500,
+               detail="Image upload failed"
+               )
 
     special = TomorrowSpecial(
         chef_id=user.id,
@@ -71,7 +81,7 @@ def is_valid_special(s):
             "%Y-%m-%d %H:%M"
         )
         return datetime.now() <= cutoff_datetime
-    except:
+    except Exception:
         return False
 
 
@@ -83,10 +93,15 @@ def get_my_specials(
     db: Session = Depends(get_db),
     user = Depends(get_current_user)
 ):
-    specials = db.query(TomorrowSpecial)\
-        .filter(TomorrowSpecial.chef_id == user.id)\
-        .order_by(TomorrowSpecial.created_at.desc())\
-        .all()
+    specials = (
+       db.query(TomorrowSpecial)
+       .filter(
+        TomorrowSpecial.chef_id == user.id,
+        TomorrowSpecial.is_active == 1
+        )
+         .order_by(TomorrowSpecial.created_at.desc())
+         .all()
+        )
 
     return [
         {
@@ -107,11 +122,15 @@ def get_my_specials(
 # =============================
 @router.get("/all")
 def get_all_specials(db: Session = Depends(get_db)):
-    specials = db.query(TomorrowSpecial)\
-        .options(joinedload(TomorrowSpecial.chef))\
-        .order_by(TomorrowSpecial.created_at.desc())\
-        .all()
-
+    specials = (
+       db.query(TomorrowSpecial)
+       .options(joinedload(TomorrowSpecial.chef))
+       .filter(TomorrowSpecial.is_active == 1)
+       .order_by(TomorrowSpecial.created_at.desc())
+       .all()
+       )
+        
+    updated = False
     data = []
 
     for s in specials:
@@ -122,8 +141,9 @@ def get_all_specials(db: Session = Depends(get_db)):
 
         # 🔥 auto sold out
         if remaining <= 0:
-            s.is_active = 0
-            db.commit()
+            if s.is_active != 0:
+                s.is_active = 0
+                updated = True
             continue
 
         data.append({
@@ -141,6 +161,8 @@ def get_all_specials(db: Session = Depends(get_db)):
             "is_active": s.is_active    ,
             "created_at": s.created_at.isoformat(),# 🔥 NEW
         })
+    if updated:
+     db.commit()
 
     return data
 
@@ -203,10 +225,13 @@ def get_nearby_specials(
     category: str = None,
     db: Session = Depends(get_db)
 ):
-    specials = db.query(TomorrowSpecial)\
-        .options(joinedload(TomorrowSpecial.chef))\
-        .order_by(TomorrowSpecial.created_at.desc())\
-        .all()
+    specials = (
+      db.query(TomorrowSpecial)
+      .options(joinedload(TomorrowSpecial.chef))
+      .filter(TomorrowSpecial.is_active == 1)
+      .order_by(TomorrowSpecial.created_at.desc())
+      .all()
+    )
 
     result = []
 

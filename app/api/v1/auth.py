@@ -47,7 +47,12 @@ async def signup(
         if len(password) < 6:
             raise HTTPException(400, "Password must be at least 6 characters")
 
-        existing_user = db.query(User).filter(User.email == email).first()
+        existing_user = (
+          db.query(User)
+          .filter(User.email == email)
+          .limit(1)
+          .first()
+        )
         if existing_user:
             raise HTTPException(400, "Email already registered")
 
@@ -109,9 +114,14 @@ async def signup(
 # ✅ LOGIN
 # =========================
 @router.post("/login")
-def login(user_data:ChefLoginSchema, db: Session = Depends(get_db)):
+def login(user_data: ChefLoginSchema, db: Session = Depends(get_db)):
 
-    user = db.query(User).filter(User.email == user_data.email).first()
+    user = (
+     db.query(User)
+     .filter(User.email == user_data.email)
+     .limit(1)
+     .first()
+    )
 
     if not user or not verify_password(user_data.password, user.password):
         raise HTTPException(status_code=400, detail="Invalid credentials")
@@ -300,7 +310,12 @@ def forgot_password(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(User.email == data.email).first()
+    user = (
+      db.query(User)
+      .filter(User.email == data.email)
+      .limit(1)
+      .first()
+    )
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -337,7 +352,12 @@ def reset_password(data: ResetPasswordSchema, db: Session = Depends(get_db)):
     if token_data["expires"] < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Token expired")
 
-    user = db.query(User).filter(User.id == token_data["user_id"]).first()
+    user = (
+      db.query(User)
+      .filter(User.id == token_data["user_id"])
+      .limit(1)
+      .first()
+    )
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from datetime import datetime
 import os
+from app.core.cache import delete_cache
 
 from app.api.deps import get_db, get_current_user
 from app.models.order import Order
@@ -19,12 +20,15 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 @router.get("/chef-orders")
 def get_chef_orders(
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user)
 ):
-    orders = db.query(Order)\
-        .filter(Order.chef_id == user.id)\
-        .order_by(Order.created_at.desc())\
-        .all()
+    orders = (
+     db.query(Order)
+     .options(selectinload(Order.items))
+     .filter(Order.chef_id == user.id)
+     .order_by(Order.created_at.desc())
+     .all()
+    )
 
     data = []
 
@@ -68,9 +72,13 @@ def get_chef_orders(
 # =========================
 @router.get("/")
 def get_my_orders(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    orders = db.query(Order).filter(
-        Order.user_id == user.id
-    ).order_by(Order.created_at.desc()).all()
+    orders = (
+     db.query(Order)
+     .options(selectinload(Order.items))
+     .filter(Order.user_id == user.id)
+     .order_by(Order.created_at.desc())
+     .all()
+    )
 
     return [
         {
@@ -104,14 +112,17 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
     except:
         raise HTTPException(status_code=400, detail="Invalid order ID")
 
-    order = db.query(Order).filter(Order.id == order_uuid).first()
+    order = (
+     db.query(Order)
+     .options(selectinload(Order.items))
+     .filter(Order.id == order_uuid)
+     .first()
+    )
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    items = db.query(OrderItem).filter(
-        OrderItem.order_id == order.id
-    ).all()
+    
 
     return {
         "id": str(order.id),
@@ -128,7 +139,7 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
                 "quantity": item.quantity,
                 "price": item.price
             }
-            for item in items
+            for item in order.items
         ]
     }
 # =========================
@@ -157,7 +168,53 @@ def create_order(
         total_price = 0
         chef_id = None
         created_items = []
+    # =========================
+# 🚀 FETCH ALL SPECIALS IN ONE QUERY
+# =========================
+        special_ids = [item.special_id for item in data.items if item.special_id]
 
+        specials = {}
+
+        if special_ids:
+            special_list = (
+             db.query(TomorrowSpecial)
+             .filter(
+              TomorrowSpecial.id.in_(special_ids),
+              TomorrowSpecial.is_active == True,
+              )
+             .all()
+              )
+
+            specials = {
+             special.id: special
+             for special in special_list
+             }
+        
+        
+        # =========================
+# 🚀 FETCH ALL MENUS IN ONE QUERY
+# =========================
+        menu_ids = [item.menu_id for item in data.items if item.menu_id]
+
+        menus = {}
+
+        if menu_ids:
+            menu_list = (
+                    db.query(Menu)
+                    .filter(
+                    Menu.id.in_(menu_ids),
+                    Menu.is_available == True,
+                    Menu.is_deleted == False,
+                    )
+                    .all()
+                    )
+            
+            menus = {
+                    menu.id: menu
+                    for menu in menu_list
+            }
+            
+        
         # =========================
         # 🧾 CREATE ORDER
         # =========================
@@ -188,10 +245,14 @@ def create_order(
             # 🍽️ MENU ITEM
             # =========================
             if item.menu_id:
-                menu = db.query(Menu).filter(Menu.id == item.menu_id).first()
 
-                if not menu:
-                    raise HTTPException(status_code=404, detail="Menu not found")
+                menu = menus.get(item.menu_id)
+
+                if menu is None:
+                    raise HTTPException(
+                       status_code=404,
+                       detail="Menu not found"
+                       )
 
                 if not data.is_subscription:
                     if menu.quantity < item.quantity:
@@ -227,12 +288,16 @@ def create_order(
             # 🔥 SPECIAL ITEM
             # =========================
             elif item.special_id:
-                special = db.query(TomorrowSpecial).filter(
-                    TomorrowSpecial.id == item.special_id
-                ).first()
+                special = specials.get(item.special_id)
 
-                if not special:
-                    raise HTTPException(status_code=404, detail="Special not found")
+                if special is None:
+                   raise HTTPException(
+                        status_code=404,
+                        detail="Special not found"
+                        )
+                
+
+                
 
                 remaining = special.max_plates - special.pre_orders
 
@@ -301,6 +366,8 @@ def create_order(
                 db.delete(cart)
 
         db.commit()
+        if chef_id:
+           delete_cache(f"dashboard:{chef_id}")
         db.refresh(order)
 
         return {
@@ -673,6 +740,7 @@ def update_status(
         ))
 
     db.commit()
+    delete_cache(f"dashboard:{order.chef_id}")
 
     return {"msg": "updated", "status": status}
 
