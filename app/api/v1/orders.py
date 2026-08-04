@@ -180,7 +180,7 @@ def create_order(
              db.query(TomorrowSpecial)
              .filter(
               TomorrowSpecial.id.in_(special_ids),
-              TomorrowSpecial.is_active == True,
+              TomorrowSpecial.is_active == 1,
               )
              .all()
               )
@@ -305,6 +305,9 @@ def create_order(
                     raise HTTPException(status_code=400, detail="Out of stock")
 
                 special.pre_orders += item.quantity
+                
+                if special.pre_orders >= special.max_plates:
+                    special.is_active = 0
 
                 if not chef_id:
                     chef_id = special.chef_id
