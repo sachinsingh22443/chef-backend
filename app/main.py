@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
-
+from app.api import whatsapp
 from app.db.session import engine
 from app.db.base import Base
 
@@ -90,6 +90,10 @@ app.include_router(notification.router)
 app.include_router(tomorrow_special.router)
 app.include_router(dashboard.router)
 app.include_router(review.router)
+app.include_router(
+    whatsapp.router,
+    prefix="/api",
+)
 
 
 # ==========================
