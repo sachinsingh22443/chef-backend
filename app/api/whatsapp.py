@@ -177,3 +177,37 @@ async def whatsapp_webhook(request: Request):
         return {
             "status": "received"
         }
+        
+
+
+
+
+
+# =========================================================
+# TEST WHATSAPP MESSAGE
+# =========================================================
+
+@router.post("/test-message")
+async def test_whatsapp_message(
+    recipient: str,
+):
+    """
+    Send a test WhatsApp message.
+    Development/testing only.
+    """
+
+    from app.services.whatsapp import send_whatsapp_message
+
+    result = await send_whatsapp_message(
+        recipient=recipient,
+        message=(
+            "✅ EatUnity WhatsApp Test\n\n"
+            "WhatsApp notification system is working successfully! 🚀"
+        ),
+    )
+
+    return {
+        "status": "success",
+        "message": "WhatsApp test message sent",
+        "response": result,
+    }

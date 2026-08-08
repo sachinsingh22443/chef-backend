@@ -71,6 +71,16 @@ class SubscriptionPlan(Base):
     )
 
     meal_type = Column(ARRAY(String))
+    breakfast_available = Column(
+      Boolean,
+      default=False,
+      nullable=False,
+      )
+
+    breakfast_price = Column(
+     Float,
+     nullable=True,
+    )
 
     plan_type = Column(String)
 

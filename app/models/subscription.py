@@ -5,6 +5,7 @@ from sqlalchemy import (
     String,
     Integer,
     Float,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -68,6 +69,17 @@ class Subscription(Base):
     price = Column(Float, nullable=False)
 
     meals_per_day = Column(Integer)
+    
+    breakfast_enabled = Column(
+      Boolean,
+      default=False,
+      nullable=False,
+    )
+
+    breakfast_price = Column(
+     Float,
+     nullable=True,
+    )
 
     # 🔥 DELIVERY
     delivery_days = Column(ARRAY(String))

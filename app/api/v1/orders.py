@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, selectinload
 from datetime import datetime
 import os
 from app.core.cache import delete_cache
-
+from app.services.whatsapp import send_new_order_whatsapp
 from app.api.deps import get_db, get_current_user
 from app.models.order import Order
 from app.models.order_item import OrderItem
@@ -153,7 +153,7 @@ from app.models.tomorrow_special import TomorrowSpecial
 
 
 @router.post("/")
-def create_order(
+async def create_order(
     data: OrderCreate,
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
@@ -202,9 +202,9 @@ def create_order(
             menu_list = (
                     db.query(Menu)
                     .filter(
-                    Menu.id.in_(menu_ids),
-                    Menu.is_available == True,
-                    Menu.is_deleted == False,
+                     Menu.id.in_(menu_ids),
+                     Menu.is_available == True,
+                     Menu.is_deleted == False,
                     )
                     .all()
                     )
@@ -291,7 +291,7 @@ def create_order(
                 special = specials.get(item.special_id)
 
                 if special is None:
-                   raise HTTPException(
+                    raise HTTPException(
                         status_code=404,
                         detail="Special not found"
                         )
@@ -351,10 +351,10 @@ def create_order(
             message=f"You received an order of ₹{total_price}"
         ))
         db.add(Notification(
-        user_id=user.id,
-        type="order",
-        title="Order Placed",
-        message=f"Your order for ₹{total_price} has been placed successfully."
+         user_id=user.id,
+         type="order",
+         title="Order Placed",
+         message=f"Your order for ₹{total_price} has been placed successfully."
         ))
 
         # =========================
@@ -369,6 +369,37 @@ def create_order(
                 db.delete(cart)
 
         db.commit()
+        
+        try:
+            items_text = ", ".join(
+              f"{item['name']} x{item['quantity']}"
+              for item in created_items
+            )
+            
+            
+            print("📱 SENDING ORDER WHATSAPP | " f"order_id={order.id} | " f"customer={order.customer_name}")
+            whatsapp_result = await send_new_order_whatsapp(
+                order_id=str(order.id),
+                customer_name=order.customer_name,
+                amount=float(order.total_price),
+                items=items_text,
+            )
+            print(
+                  "✅ ORDER WHATSAPP RESULT:",
+                  whatsapp_result
+                )
+
+        except Exception as e:
+            print("⚠️ WHATSAPP NOTIFICATION ERROR:", str(e))
+                
+            
+
+            
+
+        
+        
+        
+        
         if chef_id:
            delete_cache(f"dashboard:{chef_id}")
         db.refresh(order)

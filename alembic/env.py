@@ -25,8 +25,17 @@ from app.db.base import Base
 
 # Aapke main.py ke exact imports jo error ko fix karenge
 from app.models.refresh_token import RefreshToken
-from app.models import user, menu, order, order_item, subscription_plan
-
+from app.models import (
+    user,
+    menu,
+    order,
+    order_item,
+    subscription,
+    subscription_plan,
+    subscription_meal_schedule,
+    wallet,
+    wallet_transaction,
+)
 # Agar cart ya address ke alag models hain jo main.py me import nahi the, unhe bhi safe side import kar lete hain:
 try:
     from app.models import address, cart, review, tomorrow_special

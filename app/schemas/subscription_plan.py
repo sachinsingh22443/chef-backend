@@ -11,6 +11,8 @@ class SubscriptionPlanOut(BaseModel):
     diet_type: Optional[str] = None
 
     meal_type: List[str] = []
+    breakfast_available: bool = False
+    breakfast_price: float | None = None
 
     calories_per_day: Optional[int] = None
     duration_days: Optional[int] = None
