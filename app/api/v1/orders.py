@@ -347,10 +347,10 @@ async def create_order(
         
         if data.payment_method == "cod":
             db.add(Notification(
-            user_id=user.id,
-            type="order",
-            title="Order Placed",
-            message=f"Your order for ₹{total_price} has been placed successfully."
+               user_id=user.id,
+               type="order",
+               title="Order Placed",
+               message=f"Your order for ₹{total_price} has been placed successfully."
             ))
             
             db.add(Notification(
@@ -367,76 +367,61 @@ async def create_order(
         # =========================
 # 🛒 COD ORDER
 # =========================
-    if data.payment_method == "cod":
+        if data.payment_method == "cod":
 
-        cart = db.query(Cart).filter(
-         Cart.user_id == user.id
-        ).first()
+            cart = db.query(Cart).filter(
+             Cart.user_id == user.id
+            ).first()
 
-        if cart:
-            db.query(CartItem).filter(
-             CartItem.cart_id == cart.id
-            ).delete(synchronize_session=False)
+            if cart:
+                db.query(CartItem).filter(
+                 CartItem.cart_id == cart.id
+                ).delete(synchronize_session=False)
 
-            db.delete(cart)
+                db.delete(cart)
 
     # Save COD order first
-        db.commit()
+            db.commit()
 
     # =========================
     # 📱 COD WHATSAPP
     # =========================
-        try:
+            try:
 
-            items_text = ", ".join(
-             f"{item['name']} x{item['quantity']}"
-             for item in created_items
-            )
+                items_text = ", ".join(
+                  f"{item['name']} x{item['quantity']}"
+                  for item in created_items
+                )
 
-            print(
-             "📱 SENDING COD ORDER WHATSAPP | "
-             f"order_id={order.id} | "
-             f"customer={order.customer_name}"
-            )
+                print(
+                 "📱 SENDING COD ORDER WHATSAPP | "
+                 f"order_id={order.id} | "
+                 f"customer={order.customer_name}"
+                )
 
-            whatsapp_result = await send_new_order_whatsapp(
-             order_id=str(order.id),
-             customer_name=order.customer_name,
-             amount=float(order.total_price),
-             items=items_text,
-             )
+                whatsapp_result = await send_new_order_whatsapp(
+                   order_id=str(order.id),
+                   customer_name=order.customer_name,
+                   amount=float(order.total_price),
+                   items=items_text,
+                )
 
-            print(
-             "✅ COD ORDER WHATSAPP RESULT:",
-             whatsapp_result
-           )
+                print(
+                   "✅ COD ORDER WHATSAPP RESULT:",
+                   whatsapp_result
+                )
 
-        except Exception as e:
+            except Exception as e:
 
-            print(
-             "⚠️ COD WHATSAPP NOTIFICATION ERROR:",
-             str(e)
-            )
+                print(
+                 "⚠️ COD WHATSAPP NOTIFICATION ERROR:",
+                 str(e)
+                )
 
-    else:
-
-    # =========================
-    # 💳 UPI / CARD
-    # =========================
-    # Payment successful hone tak
-    # WhatsApp nahi bhejna.
-     db.commit()
-                
-            
-
-            
-
-        
-        
-        
-        
+        else:
+            db.commit()
         if chef_id:
-           delete_cache(f"dashboard:{chef_id}")
+            delete_cache(f"dashboard:{chef_id}")
         db.refresh(order)
 
         return {
