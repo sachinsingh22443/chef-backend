@@ -344,53 +344,88 @@ async def create_order(
         # =========================
         # 🔔 NOTIFICATION
         # =========================
-        db.add(Notification(
-            user_id=chef_id,
+        
+        if data.payment_method == "cod":
+            db.add(Notification(
+            user_id=user.id,
             type="order",
-            title="New Order Received",
-            message=f"You received an order of ₹{total_price}"
-        ))
-        db.add(Notification(
-         user_id=user.id,
-         type="order",
-         title="Order Placed",
-         message=f"Your order for ₹{total_price} has been placed successfully."
-        ))
+            title="Order Placed",
+            message=f"Your order for ₹{total_price} has been placed successfully."
+            ))
+            
+            db.add(Notification(
+               user_id=chef_id,
+               type="order",
+               title="New Order Received",
+               message=f"You received an order of ₹{total_price}"
+            ))
+        
 
         # =========================
         # 🛒 CLEAR CART (COD)
         # =========================
-        if data.payment_method == "cod":
-            cart = db.query(Cart).filter(Cart.user_id == user.id).first()
-            if cart:
-                db.query(CartItem).filter(
-                    CartItem.cart_id == cart.id
-                ).delete(synchronize_session=False)
-                db.delete(cart)
+        # =========================
+# 🛒 COD ORDER
+# =========================
+    if data.payment_method == "cod":
 
+        cart = db.query(Cart).filter(
+         Cart.user_id == user.id
+        ).first()
+
+        if cart:
+            db.query(CartItem).filter(
+             CartItem.cart_id == cart.id
+            ).delete(synchronize_session=False)
+
+            db.delete(cart)
+
+    # Save COD order first
         db.commit()
-        
+
+    # =========================
+    # 📱 COD WHATSAPP
+    # =========================
         try:
+
             items_text = ", ".join(
-              f"{item['name']} x{item['quantity']}"
-              for item in created_items
+             f"{item['name']} x{item['quantity']}"
+             for item in created_items
             )
-            
-            
-            print("📱 SENDING ORDER WHATSAPP | " f"order_id={order.id} | " f"customer={order.customer_name}")
-            whatsapp_result = await send_new_order_whatsapp(
-                order_id=str(order.id),
-                customer_name=order.customer_name,
-                amount=float(order.total_price),
-                items=items_text,
-            )
+
             print(
-                  "✅ ORDER WHATSAPP RESULT:",
-                  whatsapp_result
-                )
+             "📱 SENDING COD ORDER WHATSAPP | "
+             f"order_id={order.id} | "
+             f"customer={order.customer_name}"
+            )
+
+            whatsapp_result = await send_new_order_whatsapp(
+             order_id=str(order.id),
+             customer_name=order.customer_name,
+             amount=float(order.total_price),
+             items=items_text,
+             )
+
+            print(
+             "✅ COD ORDER WHATSAPP RESULT:",
+             whatsapp_result
+           )
 
         except Exception as e:
-            print("⚠️ WHATSAPP NOTIFICATION ERROR:", str(e))
+
+            print(
+             "⚠️ COD WHATSAPP NOTIFICATION ERROR:",
+             str(e)
+            )
+
+    else:
+
+    # =========================
+    # 💳 UPI / CARD
+    # =========================
+    # Payment successful hone tak
+    # WhatsApp nahi bhejna.
+     db.commit()
                 
             
 
@@ -548,7 +583,7 @@ import hashlib
 import os
 
 @router.post("/verify-payment")
-def verify_payment(
+async def verify_payment(
     data: dict,
     db: Session = Depends(get_db),
     user = Depends(get_current_user)   # 🔥 ADD THIS
@@ -610,7 +645,26 @@ def verify_payment(
         type="payment",
         title="Payment Successful",
         message=f"Payment of ₹{order.total_price} received successfully."
-))
+        ))
+        
+        
+        db.add(Notification(
+          user_id=order.user_id,
+          type="order",
+          title="Order Placed",
+          message=f"Your order for ₹{order.total_price} has been placed successfully."
+        ))
+        
+        # =========================
+# 🔔 CHEF NOTIFICATION
+# PAYMENT SUCCESSFUL
+# =========================
+        db.add(Notification(
+         user_id=order.chef_id,
+         type="order",
+         title="New Order Received",
+         message=f"You received a paid order of ₹{order.total_price}"
+        ))
         order.payment_id = data.get("razorpay_payment_id")
 
         # बेहतर flow
@@ -628,6 +682,37 @@ def verify_payment(
             db.delete(cart)
 
         db.commit()
+        try:
+
+            items_text = ", ".join(
+             f"{item.item_name} x{item.quantity}"
+             for item in order.items
+            )
+            
+            print(
+                 "📱 SENDING PAID ORDER WHATSAPP | "
+                 f"order_id={order.id} | "
+                 f"customer={order.customer_name}"
+                )
+            
+            whatsapp_result = await send_new_order_whatsapp(
+               order_id=str(order.id),
+               customer_name=order.customer_name,
+               amount=float(order.total_price),
+               items=items_text,
+            )
+            
+            print(
+              "✅ PAID ORDER WHATSAPP RESULT:",
+              whatsapp_result
+            )
+        except Exception as e:
+
+            print(
+              "⚠️ PAID ORDER WHATSAPP NOTIFICATION ERROR:",
+              str(e)
+            )
+
 
         return {
             "msg": "Payment success",
