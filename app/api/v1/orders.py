@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from datetime import datetime
+from sqlalchemy import or_
 import os
 from app.core.cache import delete_cache
 from app.services.whatsapp import send_new_order_whatsapp
@@ -25,7 +26,13 @@ def get_chef_orders(
     orders = (
      db.query(Order)
      .options(selectinload(Order.items))
-     .filter(Order.chef_id == user.id)
+     .filter(
+       Order.chef_id == user.id,
+       or_(
+        Order.payment_method != "cod",
+        Order.cod_confirmed == True
+       )
+       )
      .order_by(Order.created_at.desc())
      .all()
     )
@@ -295,10 +302,6 @@ async def create_order(
                         status_code=404,
                         detail="Special not found"
                         )
-                
-
-                
-
                 remaining = special.max_plates - special.pre_orders
 
                 if remaining < item.quantity:
@@ -340,33 +343,6 @@ async def create_order(
             total_price = data.amount
         order.total_price = total_price
         order.chef_id = chef_id
-
-        # =========================
-        # 🔔 NOTIFICATION
-        # =========================
-        
-        if data.payment_method == "cod":
-            db.add(Notification(
-               user_id=user.id,
-               type="order",
-               title="Order Placed",
-               message=f"Your order for ₹{total_price} has been placed successfully."
-            ))
-            
-            db.add(Notification(
-               user_id=chef_id,
-               type="order",
-               title="New Order Received",
-               message=f"You received an order of ₹{total_price}"
-            ))
-        
-
-        # =========================
-        # 🛒 CLEAR CART (COD)
-        # =========================
-        # =========================
-# 🛒 COD ORDER
-# =========================
         if data.payment_method == "cod":
 
             cart = db.query(Cart).filter(
@@ -382,41 +358,6 @@ async def create_order(
 
     # Save COD order first
             db.commit()
-
-    # =========================
-    # 📱 COD WHATSAPP
-    # =========================
-            try:
-
-                items_text = ", ".join(
-                  f"{item['name']} x{item['quantity']}"
-                  for item in created_items
-                )
-
-                print(
-                 "📱 SENDING COD ORDER WHATSAPP | "
-                 f"order_id={order.id} | "
-                 f"customer={order.customer_name}"
-                )
-
-                whatsapp_result = await send_new_order_whatsapp(
-                   order_id=str(order.id),
-                   customer_name=order.customer_name,
-                   amount=float(order.total_price),
-                   items=items_text,
-                )
-
-                print(
-                   "✅ COD ORDER WHATSAPP RESULT:",
-                   whatsapp_result
-                )
-
-            except Exception as e:
-
-                print(
-                 "⚠️ COD WHATSAPP NOTIFICATION ERROR:",
-                 str(e)
-                )
 
         else:
             db.commit()
@@ -444,6 +385,161 @@ async def create_order(
         db.rollback()
         print("❌ ORDER ERROR:", str(e))
         raise HTTPException(status_code=500, detail="Order creation failed")
+    
+    
+# =========================
+# 💵 CONFIRM COD ORDER
+# =========================
+
+@router.post("/{order_id}/confirm-cod")
+async def confirm_cod_order(
+    order_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    try:
+        # =========================
+        # 🔥 UUID VALIDATION
+        # =========================
+        try:
+            order_uuid = UUID(order_id)
+        except:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid order ID"
+            )
+
+        # =========================
+        # 🔍 FIND CUSTOMER ORDER
+        # =========================
+        order = (
+            db.query(Order)
+            .options(selectinload(Order.items))
+            .filter(
+                Order.id == order_uuid,
+                Order.user_id == user.id
+            )
+            .first()
+        )
+
+        if not order:
+            raise HTTPException(
+                status_code=404,
+                detail="Order not found"
+            )
+
+        # =========================
+        # 💵 COD CHECK
+        # =========================
+        if order.payment_method != "cod":
+            raise HTTPException(
+                status_code=400,
+                detail="This is not a COD order"
+            )
+
+        # =========================
+        # 🚫 DUPLICATE CHECK
+        # =========================
+        if order.cod_confirmed:
+            raise HTTPException(
+                status_code=400,
+                detail="COD order already confirmed"
+            )
+
+        # =========================
+        # ✅ CONFIRM COD
+        # =========================
+        order.cod_confirmed = True
+        order.status = "pending"
+
+        # =========================
+        # 🔔 CUSTOMER NOTIFICATION
+        # =========================
+        db.add(Notification(
+            user_id=order.user_id,
+            type="order",
+            title="Order Confirmed",
+            message=(
+                f"Your COD order for ₹{order.total_price} "
+                f"has been confirmed successfully."
+            )
+        ))
+
+        # =========================
+        # 🔔 CHEF NOTIFICATION
+        # =========================
+        db.add(Notification(
+            user_id=order.chef_id,
+            type="order",
+            title="New Order Received",
+            message=(
+                f"You received a COD order "
+                f"of ₹{order.total_price}"
+            )
+        ))
+
+        # =========================
+        # 💾 SAVE FIRST
+        # =========================
+        db.commit()
+        db.refresh(order)
+
+        # =========================
+        # 📱 WHATSAPP → SACHIN
+        # =========================
+        try:
+            items_text = ", ".join(
+                f"{item.item_name} x{item.quantity}"
+                for item in order.items
+            )
+
+            print(
+                "📱 SENDING COD ORDER WHATSAPP | "
+                f"order_id={order.id} | "
+                f"customer={order.customer_name}"
+            )
+
+            whatsapp_result = await send_new_order_whatsapp(
+                order_id=str(order.id),
+                customer_name=order.customer_name,
+                amount=float(order.total_price),
+                items=items_text
+            )
+
+            print(
+                "✅ COD ORDER WHATSAPP RESULT:",
+                whatsapp_result
+            )
+
+        except Exception as e:
+            print(
+                "⚠️ COD WHATSAPP NOTIFICATION ERROR:",
+                str(e)
+            )
+
+        # =========================
+        # 🔥 CLEAR CHEF CACHE
+        # =========================
+        if order.chef_id:
+            delete_cache(f"dashboard:{order.chef_id}")
+
+        return {
+            "status": "success",
+            "message": "COD order confirmed",
+            "order_id": str(order.id),
+            "cod_confirmed": order.cod_confirmed
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        db.rollback()
+        print("❌ COD CONFIRM ERROR:", str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="COD confirmation failed"
+        )
 # =========================
 # 💳 CREATE PAYMENT
 # =========================

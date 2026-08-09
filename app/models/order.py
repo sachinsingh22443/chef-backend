@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Index
+from sqlalchemy import Column, String, Float, ForeignKey, DateTime, Index, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
@@ -29,7 +29,12 @@ class Order(Base):
         default="pending",
         index=True
     )
-
+    
+    cod_confirmed = Column(
+      Boolean,
+      default=False,
+      nullable=False
+    )
     total_price = Column(Float)
 
     created_at = Column(
