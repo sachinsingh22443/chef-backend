@@ -8,7 +8,7 @@ from fastapi.responses import ORJSONResponse
 from app.api import whatsapp
 from app.db.session import engine
 from app.db.base import Base
-
+from app.api.v1.wallet import router as wallet_router
 # Models
 from app.models.refresh_token import RefreshToken
 from app.models import user, menu, order, order_item, subscription_plan
@@ -94,6 +94,7 @@ app.include_router(
     whatsapp.router,
     prefix="/api",
 )
+app.include_router(wallet_router)
 
 
 # ==========================

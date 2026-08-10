@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -152,6 +152,29 @@ def turn_meal_off(
     # ---------------------------------------------------------
     # ALREADY OFF
     # ---------------------------------------------------------
+    # ---------------------------------------------------------
+# CHECK CUTOFF TIME
+# ---------------------------------------------------------
+
+    now = datetime.now()
+
+    cutoff_times = {
+      "breakfast": time(8, 0),
+      "lunch": time(10, 0),
+      "dinner": time(17, 0),
+    }
+
+    cutoff_time = cutoff_times[meal_type]
+
+    if now.time() >= cutoff_time:
+        raise HTTPException(
+         status_code=400,
+         detail=(
+            f"{meal_type.capitalize()} cutoff time has passed. "
+            f"You cannot turn OFF {meal_type} after "
+            f"{cutoff_time.strftime('%I:%M %p')}."
+         ),
+        )
 
     if meal.status == "off":
         raise HTTPException(

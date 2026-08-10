@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import (
     Column,
+    Float,
     String,
     Date,
     DateTime,
@@ -43,6 +44,10 @@ class SubscriptionMealSchedule(Base):
     meal_type = Column(
         String,
         nullable=False,
+    )
+    meal_price = Column(
+     Float,
+     nullable=False,
     )
 
     status = Column(

@@ -14,6 +14,7 @@ class SubscriptionCreate(BaseModel):
     menu_id: UUID
 
     plan_id: str
+    duration_days: int
 
     meals_per_day: int
 

@@ -207,3 +207,44 @@ async def send_new_order_whatsapp(
     return await send_whatsapp_to_admins(
         message
     )
+    
+# =========================================================
+# SUBSCRIPTION DIET NOTIFICATION
+# =========================================================
+
+async def send_subscription_meal_whatsapp(
+    customer_name: str,
+    meal_type: str,
+    action: str,
+    date: str,
+    amount: float,
+) -> list[dict]:
+
+    if action == "off":
+        message = (
+            "🥗 DIET UPDATE\n\n"
+            f"Customer: {customer_name}\n"
+            f"Meal: {meal_type.title()}\n"
+            "Action: OFF\n"
+            f"Date: {date}\n"
+            f"Wallet Credit: ₹{amount:.2f}\n\n"
+            "Today's meal has been cancelled."
+        )
+
+    elif action == "on":
+        message = (
+            "🥗 DIET UPDATE\n\n"
+            f"Customer: {customer_name}\n"
+            f"Meal: {meal_type.title()}\n"
+            "Action: ON\n"
+            f"Date: {date}\n"
+            f"Wallet Debit: ₹{amount:.2f}\n\n"
+            "Today's meal has been restored."
+        )
+
+    else:
+        raise ValueError(
+            "Invalid diet action. Use 'on' or 'off'."
+        )
+
+    return await send_whatsapp_to_admins(message)
