@@ -60,10 +60,14 @@ class TomorrowSpecial(Base):
 
     # 💰 Pricing
     price = Column(Float, nullable=False)
-
-    # 📦 Quantity
+    original_price = Column(Float, nullable=True)
+    calories = Column(Integer, nullable=True)
+    protein = Column(Float, nullable=True)
+    carbs = Column(Float, nullable=True)
+    fats = Column(Float, nullable=True)
+    preparation_time = Column(Integer, nullable=True)
+    ingredients = Column(String, nullable=True)
     max_plates = Column(Integer, nullable=False)
-
     pre_orders = Column(
         Integer,
         default=0,

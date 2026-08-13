@@ -18,11 +18,23 @@ logger = logging.getLogger(__name__)
 async def create_special(
     dish_name: str = Form(...),
     description: str = Form(None),
+
     price: float = Form(...),
+    original_price: float = Form(None),
+
     max_plates: int = Form(...),
     cutoff_time: str = Form(...),
+
+    calories: int = Form(None),
+    protein: float = Form(None),
+    carbs: float = Form(None),
+    fats: float = Form(None),
+
+    preparation_time: int = Form(None),
+    ingredients: str = Form(None),
+
     image: UploadFile = File(None),
-    food_type: str = Form(...), 
+    food_type: str = Form(...),
 
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
@@ -31,6 +43,36 @@ async def create_special(
         raise HTTPException(
          status_code=403,
          detail="Only chefs can create tomorrow specials"
+        )
+        
+    if price <= 0:
+        raise HTTPException(
+         status_code=400,
+         detail="Price must be greater than 0"
+        )
+
+    if original_price is not None and original_price < price:
+        raise HTTPException(
+         status_code=400,
+         detail="Original price must be greater than or equal to special price"
+        )
+
+    if max_plates <= 0:
+        raise HTTPException(
+         status_code=400,
+         detail="Maximum plates must be greater than 0"
+        )
+
+    if calories is not None and calories < 0:
+        raise HTTPException(
+         status_code=400,
+         detail="Calories cannot be negative"
+        )
+
+    if preparation_time is not None and preparation_time < 0:
+        raise HTTPException(
+          status_code=400,
+          detail="Preparation time cannot be negative"
         )
     image_url = None
 
@@ -54,14 +96,38 @@ async def create_special(
                )
 
     special = TomorrowSpecial(
-        chef_id=user.id,
-        dish_name=dish_name,
-        description=description,
-        price=price,
-        max_plates=max_plates,
-        cutoff_time=cutoff_time,
-        image_url=image_url,
-        food_type=food_type
+       chef_id=user.id,
+
+       dish_name=dish_name,
+       description=description,
+
+       # 💰 Pricing
+       price=price,
+       original_price=original_price,
+
+       # 📦 Quantity
+       max_plates=max_plates,
+
+       # ⏰ Timing
+       cutoff_time=cutoff_time,
+
+       # 🥗 Nutrition
+       calories=calories,
+       protein=protein,
+       carbs=carbs,
+       fats=fats,
+
+       # 🍳 Preparation
+       preparation_time=preparation_time,
+
+       # 🧂 Ingredients
+       ingredients=ingredients,
+
+       # 🖼️ Image
+       image_url=image_url,
+
+       # 🌱 Food Type
+       food_type=food_type,
     )
 
     db.add(special)
@@ -104,16 +170,45 @@ def get_my_specials(
         )
 
     return [
-        {
-            "id": str(s.id),
-            "dish_name": s.dish_name,
-            "description": s.description,
-            "price": s.price,
-            "max_plates": s.max_plates,
-            "cutoff_time": s.cutoff_time,
-            "image_url": s.image_url,
-        }
-        for s in specials if is_valid_special(s)
+     {
+        "id": str(s.id),
+
+        "dish_name": s.dish_name,
+        "description": s.description,
+
+        # 💰 Pricing
+        "price": s.price,
+        "original_price": s.original_price,
+
+        # 🥗 Nutrition
+        "calories": s.calories,
+        "protein": s.protein,
+        "carbs": s.carbs,
+        "fats": s.fats,
+
+        # 🍳 Preparation
+        "preparation_time": s.preparation_time,
+
+        # 🧂 Ingredients
+        "ingredients": s.ingredients,
+
+        # 📦 Quantity
+        "max_plates": s.max_plates,
+        "pre_orders": s.pre_orders,
+        "remaining": s.max_plates - s.pre_orders,
+
+        # ⏰ Timing
+        "cutoff_time": s.cutoff_time,
+
+        # 🖼️ Image
+        "image_url": s.image_url,
+
+        # 🌱 Food
+        "food_type": s.food_type,
+
+        "is_active": s.is_active,
+     }
+     for s in specials if is_valid_special(s)
     ]
 
 
@@ -148,21 +243,51 @@ def get_all_specials(db: Session = Depends(get_db)):
 
         data.append({
             "id": str(s.id),
+
             "dish_name": s.dish_name,
             "description": s.description,
+
+            # 💰 Pricing
             "price": s.price,
+            "original_price": s.original_price,
+
+            # 🥗 Nutrition
+            "calories": s.calories,
+            "protein": s.protein,
+            "carbs": s.carbs,
+            "fats": s.fats,
+
+            # 🍳 Preparation
+            "preparation_time": s.preparation_time,
+
+            # 🧂 Ingredients
+            "ingredients": s.ingredients,
+
+            # 📦 Quantity
             "max_plates": s.max_plates,
-            "pre_orders": s.pre_orders,          # 🔥 NEW
-            "remaining": remaining,              # 🔥 NEW
+            "pre_orders": s.pre_orders,
+            "remaining": remaining,
+
+            # ⏰ Timing
             "cutoff_time": s.cutoff_time,
+
+            # 🖼️ Image
             "image_url": s.image_url,
+
+            # 👨‍🍳 Chef
             "chef_id": str(s.chef_id),
             "chef_name": s.chef.name if s.chef else "Chef",
-            "is_active": s.is_active    ,
-            "created_at": s.created_at.isoformat(),# 🔥 NEW
-        })
-    if updated:
-     db.commit()
+
+            # 🌱 Food
+            "food_type": s.food_type,
+
+            # 📊 Status
+            "is_active": s.is_active,
+
+            "created_at": s.created_at.isoformat(),
+           })
+        if updated:
+            db.commit()
 
     return data
 
@@ -170,23 +295,33 @@ def get_all_specials(db: Session = Depends(get_db)):
 def create_pre_order(
     data: PreOrderCreate,
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user)
 ):
     special = db.query(TomorrowSpecial)\
         .filter(TomorrowSpecial.id == data.special_id)\
         .with_for_update()\
         .first()
-
+        
     if not special:
-        raise HTTPException(status_code=404, detail="Special not found")
-
+        raise HTTPException(
+          status_code=404,
+          detail="Special not found"
+        )
+    if data.quantity <= 0:
+        raise HTTPException(
+         status_code=400,
+         detail="Quantity must be at least 1"
+        )
     if special.is_active == 0:
         raise HTTPException(status_code=400, detail="Sold out")
 
     remaining = special.max_plates - special.pre_orders
 
     if data.quantity > remaining:
-        raise HTTPException(status_code=400, detail="Only {remaining} left")
+        raise HTTPException(
+          status_code=400,
+          detail=f"Only {remaining} left"
+        )
 
     # 🔥 update
     special.pre_orders += data.quantity
@@ -274,21 +409,46 @@ def get_nearby_specials(
 
         result.append({
             "id": str(s.id),
+
             "dish_name": s.dish_name,
             "description": s.description,
-            "price": s.price,
 
-            # 🔥 IMPORTANT FIX (frontend crash solve)
+            # 💰 Pricing
+            "price": s.price,
+            "original_price": s.original_price,
+
+            # 🥗 Nutrition
+            "calories": s.calories,
+            "protein": s.protein,
+            "carbs": s.carbs,
+            "fats": s.fats,
+
+            # 🍳 Preparation
+            "preparation_time": s.preparation_time,
+
+            # 🧂 Ingredients
+            "ingredients": s.ingredients,
+
+            # 📦 Quantity
             "max_plates": s.max_plates,
             "pre_orders": s.pre_orders,
-
             "remaining": remaining,
+
+            # ⏰ Timing
             "cutoff_time": s.cutoff_time,
+
+            # 🖼️ Image
             "image_url": s.image_url,
+
+            # 👨‍🍳 Chef
             "chef_id": str(s.chef_id),
             "chef_name": chef.name,
+
+            # 📍 Distance
             "distance": round(distance, 2),
-            "food_type": s.food_type
+
+            # 🌱 Food
+            "food_type": s.food_type,
         })
 
     return result
