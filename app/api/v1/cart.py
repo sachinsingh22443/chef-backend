@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from app.api.deps import get_db, get_current_user
 from app.models.menu import Menu
@@ -114,14 +114,24 @@ def add_to_cart(
                 )
 
             cutoff_datetime = datetime.strptime(
-                f"{special.created_at.date()} {special.cutoff_time}",
-                    "%Y-%m-%d %H:%M"
-                )
+                f"{special.special_date} {special.cutoff_time}",
+                "%Y-%m-%d %H:%M"
+            ).replace(
+                 tzinfo=ZoneInfo("Asia/Kolkata")
+            )
+            cutoff_datetime = cutoff_datetime - timedelta(days=1)
 
-            if datetime.now(ZoneInfo("Asia/Kolkata")) > cutoff_datetime:
+            current_time = datetime.now(
+               ZoneInfo("Asia/Kolkata")
+               )
+
+            if current_time > cutoff_datetime:
                 raise HTTPException(
                  status_code=400,
-                 detail=f"Tomorrow Special ordering closed. Order by {special.cutoff_time}"
+                 detail=(
+                   f"Tomorrow Special ordering closed. "
+                   f"Order by {special.cutoff_time}"
+                   )
                 )
 
         except HTTPException:
@@ -173,6 +183,9 @@ def add_to_cart(
 # =============================
 # ✅ UPDATE CART
 # =============================
+# =============================
+# ✅ UPDATE CART
+# =============================
 @router.put("/update")
 def update_cart(
     type: str,
@@ -181,37 +194,165 @@ def update_cart(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    cart = db.query(Cart).filter(Cart.user_id == user.id).first()
+    cart = db.query(Cart).filter(
+        Cart.user_id == user.id
+    ).first()
 
     if not cart:
-        raise HTTPException(status_code=404, detail="Cart not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Cart not found"
+        )
 
+    # =========================
+    # 🔥 MENU ITEM
+    # =========================
     if type == "menu":
+
         item = db.query(CartItem).filter(
             CartItem.cart_id == cart.id,
             CartItem.menu_id == item_id
         ).first()
 
+    # =========================
+    # 🔥 TOMORROW SPECIAL
+    # =========================
     elif type == "special":
+
         item = db.query(CartItem).filter(
             CartItem.cart_id == cart.id,
             CartItem.special_id == item_id
         ).first()
 
+        if not item:
+            raise HTTPException(
+                status_code=404,
+                detail="Special item not found in cart"
+            )
+        
+        if quantity <= 0:
+            db.delete(item)
+            db.commit()
+
+            return {
+               "msg": "Cart updated"
+            }
+
+        # =========================
+        # 🔥 FIND SPECIAL
+        # =========================
+        special = db.query(TomorrowSpecial).filter(
+            TomorrowSpecial.id == item_id
+        ).first()
+
+        if not special:
+            raise HTTPException(
+                status_code=404,
+                detail="Special not found"
+            )
+
+        # =========================
+        # ⏰ CUTOFF CHECK
+        # =========================
+        try:
+
+            if not special.special_date:
+                raise HTTPException(
+                 status_code=400,
+                 detail="Special date is not configured"
+                )
+            
+            if not special.cutoff_time:
+                raise HTTPException(
+                   status_code=400,
+                   detail="Special ordering time is not configured"
+                )
+
+            cutoff_datetime = datetime.strptime(
+               f"{special.special_date} {special.cutoff_time}",
+               "%Y-%m-%d %H:%M"
+            ).replace(
+              tzinfo=ZoneInfo("Asia/Kolkata")
+            )
+            cutoff_datetime = cutoff_datetime - timedelta(days=1)
+
+            current_time = datetime.now(
+                ZoneInfo("Asia/Kolkata")
+            )
+            if current_time > cutoff_datetime:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Tomorrow Special ordering closed. "
+                        f"Order by {special.cutoff_time}"
+                    )
+                )
+
+        except HTTPException:
+            raise
+
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid special cutoff time"
+            )
+
+        # =========================
+        # 📦 STOCK CHECK
+        # =========================
+        remaining = (
+            special.max_plates -
+            special.pre_orders
+        )
+
+        if remaining <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Tomorrow Special is sold out"
+            )
+
+        # =========================
+        # 📦 QUANTITY CHECK
+        # =========================
+        if quantity > remaining:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {remaining} plates remaining"
+            )
+
     else:
-        raise HTTPException(status_code=400, detail="Invalid type")
 
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid type"
+        )
+
+    # =========================
+    # 🔍 ITEM CHECK
+    # =========================
     if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found"
+        )
 
+    # =========================
+    # 🗑️ REMOVE
+    # =========================
     if quantity <= 0:
         db.delete(item)
+
+    # =========================
+    # 🔄 UPDATE
+    # =========================
     else:
         item.quantity = quantity
 
     db.commit()
 
-    return {"msg": "Cart updated"}
+    return {
+        "msg": "Cart updated"
+    }
 
 
 # =============================

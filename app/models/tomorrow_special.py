@@ -6,6 +6,7 @@ from sqlalchemy import (
     Integer,
     Float,
     DateTime,
+    Date,
     ForeignKey,
     Index,
 )
@@ -71,6 +72,11 @@ class TomorrowSpecial(Base):
     pre_orders = Column(
         Integer,
         default=0,
+    )
+    special_date = Column(
+     Date,
+     nullable=False,
+     index=True,
     )
 
     # ⏰ Timing

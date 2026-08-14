@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from datetime import datetime
+from datetime import timedelta
 from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 import os
@@ -129,9 +130,6 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-
-    
-
     return {
         "id": str(order.id),
         "status": order.status,
@@ -196,12 +194,7 @@ async def create_order(
             specials = {
              special.id: special
              for special in special_list
-             }
-        
-        
-        # =========================
-# 🚀 FETCH ALL MENUS IN ONE QUERY
-# =========================
+            }
         menu_ids = [item.menu_id for item in data.items if item.menu_id]
 
         menus = {}
@@ -307,21 +300,41 @@ async def create_order(
     # =========================
     # ⏰ TOMORROW SPECIAL CUTOFF
     # =========================
+                # =========================
+# ⏰ TOMORROW SPECIAL CUTOFF
+# =========================
                 try:
+                    if not special.special_date:
+                        raise HTTPException(
+                          status_code=400,
+                          detail="Special date is not configured"
+                        )
                     if not special.cutoff_time:
                         raise HTTPException(
                           status_code=400,
                           detail="Special ordering time is not configured"
-                        )
-
+                          )
                     cutoff_datetime = datetime.strptime(
-                      f"{special.created_at.date()} {special.cutoff_time}",
-                      "%Y-%m-%d %H:%M"
+                       f"{special.special_date} {special.cutoff_time}",
+                       "%Y-%m-%d %H:%M"
+                       ).replace(
+                        tzinfo=ZoneInfo("Asia/Kolkata")
                     )
-                    if datetime.now(ZoneInfo("Asia/Kolkata")) > cutoff_datetime:
+                    
+                    cutoff_datetime = cutoff_datetime - timedelta(days=1)
+
+                    current_time = datetime.now(
+                      ZoneInfo("Asia/Kolkata")
+                    )
+
+                    if current_time > cutoff_datetime:
                         raise HTTPException(
-                            status_code=400,
-                            detail=f"Tomorrow Special ordering closed. Order by {special.cutoff_time}"
+                          status_code=400,
+                          detail=(
+                            f"Tomorrow Special ordering closed. "
+                            f"Order by {special.cutoff_time} "
+                            f"on the day before the special."
+                            )
                         )
 
                 except HTTPException:
@@ -329,9 +342,9 @@ async def create_order(
 
                 except Exception:
                     raise HTTPException(
-                        status_code=400,
-                        detail="Invalid special cutoff time"
-                    )
+                       status_code=400,
+                       detail="Invalid special date or cutoff time"
+                      )
 
                 remaining = special.max_plates - special.pre_orders
 
