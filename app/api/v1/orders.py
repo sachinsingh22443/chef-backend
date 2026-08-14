@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 import os
 from app.core.cache import delete_cache
@@ -299,23 +300,59 @@ async def create_order(
 
                 if special is None:
                     raise HTTPException(
-                        status_code=404,
-                        detail="Special not found"
+                      status_code=404,
+                      detail="Special not found"
+                    )
+
+    # =========================
+    # ⏰ TOMORROW SPECIAL CUTOFF
+    # =========================
+                try:
+                    if not special.cutoff_time:
+                        raise HTTPException(
+                          status_code=400,
+                          detail="Special ordering time is not configured"
                         )
+
+                    cutoff_datetime = datetime.strptime(
+                      f"{special.created_at.date()} {special.cutoff_time}",
+                      "%Y-%m-%d %H:%M"
+                    )
+                    if datetime.now(ZoneInfo("Asia/Kolkata")) > cutoff_datetime:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Tomorrow Special ordering closed. Order by {special.cutoff_time}"
+                        )
+
+                except HTTPException:
+                    raise
+
+                except Exception:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid special cutoff time"
+                    )
+
                 remaining = special.max_plates - special.pre_orders
 
                 if remaining < item.quantity:
-                    raise HTTPException(status_code=400, detail="Out of stock")
+                    raise HTTPException(
+                      status_code=400,
+                      detail="Out of stock"
+                    )
 
                 special.pre_orders += item.quantity
-                
+
                 if special.pre_orders >= special.max_plates:
                     special.is_active = 0
 
                 if not chef_id:
                     chef_id = special.chef_id
                 elif chef_id != special.chef_id:
-                    raise HTTPException(status_code=400, detail="Different chefs not allowed")
+                    raise HTTPException(
+                      status_code=400,
+                      detail="Different chefs not allowed"
+                    )
 
                 price = special.price * item.quantity
                 total_price += price
@@ -330,10 +367,10 @@ async def create_order(
                 ))
 
                 created_items.append({
-                    "name": special.dish_name,
-                    "quantity": item.quantity,
-                    "price": price,
-                    "image": special.image_url
+                   "name": special.dish_name,
+                   "quantity": item.quantity,
+                   "price": price,
+                   "image": special.image_url
                 })
 
         # =========================

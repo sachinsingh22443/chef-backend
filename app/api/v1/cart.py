@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from app.api.deps import get_db, get_current_user
 from app.models.menu import Menu
 from app.models.cart import Cart, CartItem
 from app.models.tomorrow_special import TomorrowSpecial
-
+from pydantic import BaseModel
 router = APIRouter(prefix="/cart", tags=["Cart"])
 
 
@@ -23,13 +24,13 @@ def get_cart(db: Session = Depends(get_db), user=Depends(get_current_user)):
 
     for item in cart.items:
         items.append({
-        "id": str(item.menu_id or item.special_id),
-        "name": item.name,
-        "price": item.price,
-        "image": item.image,
-        "quantity": item.quantity,
-        "type": "menu" if item.menu_id else "special"   # 🔥🔥 MOST IMPORTANT
-    })
+          "id": str(item.menu_id or item.special_id),
+          "name": item.name,
+          "price": item.price,
+          "image": item.image,
+          "quantity": item.quantity,
+          "type": "menu" if item.menu_id else "special"   # 🔥🔥 MOST IMPORTANT
+        })
 
     return {"items": items}
 
@@ -37,7 +38,7 @@ def get_cart(db: Session = Depends(get_db), user=Depends(get_current_user)):
 # =============================
 # ✅ ADD TO CART
 # =============================
-from pydantic import BaseModel
+
 
 class CartItemCreate(BaseModel):
     type: str
@@ -97,7 +98,40 @@ def add_to_cart(
         special = db.query(TomorrowSpecial).filter(TomorrowSpecial.id == data.item_id).first()
 
         if not special:
-            raise HTTPException(status_code=404, detail="Special not found")
+            raise HTTPException(
+              status_code=404,
+              detail="Special not found"
+            )
+
+# =========================
+# ⏰ TOMORROW SPECIAL CUTOFF
+# =========================
+        try:
+            if not special.cutoff_time:
+                raise HTTPException(
+                 status_code=400,
+                 detail="Special ordering time is not configured"
+                )
+
+            cutoff_datetime = datetime.strptime(
+                f"{special.created_at.date()} {special.cutoff_time}",
+                    "%Y-%m-%d %H:%M"
+                )
+
+            if datetime.now(ZoneInfo("Asia/Kolkata")) > cutoff_datetime:
+                raise HTTPException(
+                 status_code=400,
+                 detail=f"Tomorrow Special ordering closed. Order by {special.cutoff_time}"
+                )
+
+        except HTTPException:
+            raise
+
+        except Exception:
+            raise HTTPException(
+               status_code=400,
+               detail="Invalid special cutoff time"
+            )
 
         remaining = special.max_plates - special.pre_orders
 
