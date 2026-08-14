@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session, joinedload
 import cloudinary.uploader
-from datetime import datetime
+from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 import logging
 from app.api.deps import get_db, get_current_user
 from app.models.tomorrow_special import TomorrowSpecial
@@ -74,6 +75,12 @@ async def create_special(
           status_code=400,
           detail="Preparation time cannot be negative"
         )
+    india_now = datetime.now(
+      ZoneInfo("Asia/Kolkata")
+    )
+    special_date = (
+      india_now + timedelta(days=1)
+    ).date()
     image_url = None
 
     if image:
@@ -110,6 +117,7 @@ async def create_special(
 
        # ⏰ Timing
        cutoff_time=cutoff_time,
+       special_date=special_date,
 
        # 🥗 Nutrition
        calories=calories,
@@ -140,13 +148,34 @@ async def create_special(
 # =============================
 # 🔥 COMMON FILTER FUNCTION
 # =============================
+# =============================
+# 🔥 COMMON SPECIAL VALIDATION
+# =============================
 def is_valid_special(s):
     try:
+        if not s.special_date:
+            return False
+
+        if not s.cutoff_time:
+            return False
+
         cutoff_datetime = datetime.strptime(
-            f"{s.created_at.date()} {s.cutoff_time}",
+            f"{s.special_date} {s.cutoff_time}",
             "%Y-%m-%d %H:%M"
+        ).replace(
+            tzinfo=ZoneInfo("Asia/Kolkata")
         )
-        return datetime.now() <= cutoff_datetime
+
+        current_time = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        )
+
+        # Cutoff ke baad customer listing se hide
+        if current_time >= cutoff_datetime:
+            return False
+
+        return True
+
     except Exception:
         return False
 
@@ -199,7 +228,8 @@ def get_my_specials(
 
         # ⏰ Timing
         "cutoff_time": s.cutoff_time,
-
+        "special_date": s.special_date.isoformat() if s.special_date else None,
+    
         # 🖼️ Image
         "image_url": s.image_url,
 
@@ -208,9 +238,144 @@ def get_my_specials(
 
         "is_active": s.is_active,
      }
-     for s in specials if is_valid_special(s)
+     for s in specials
     ]
 
+
+# =============================
+# 👨‍🍳 CHEF - MY SPECIAL HISTORY
+# =============================
+@router.get("/history")
+def get_special_history(
+    date_filter: date = None,
+    from_date: date = None,
+    to_date: date = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # =============================
+    # 🔐 ONLY CHEF
+    # =============================
+    if user.role != "chef":
+        raise HTTPException(
+            status_code=403,
+            detail="Only chefs can access special history"
+        )
+
+    # =============================
+    # 🔎 BASE QUERY
+    # =============================
+    query = db.query(TomorrowSpecial).filter(
+        TomorrowSpecial.chef_id == user.id
+    )
+
+    # =============================
+    # 📅 SPECIFIC DATE
+    # =============================
+    if date_filter:
+        query = query.filter(
+            TomorrowSpecial.special_date == date_filter
+        )
+
+    # =============================
+    # 📅 DATE RANGE
+    # =============================
+    elif from_date and to_date:
+
+        if from_date > to_date:
+            raise HTTPException(
+                status_code=400,
+                detail="from_date cannot be greater than to_date"
+            )
+
+        query = query.filter(
+            TomorrowSpecial.special_date >= from_date,
+            TomorrowSpecial.special_date <= to_date
+        )
+
+    # =============================
+    # 📅 ONLY FROM DATE
+    # =============================
+    elif from_date:
+        query = query.filter(
+            TomorrowSpecial.special_date >= from_date
+        )
+
+    # =============================
+    # 📅 ONLY TO DATE
+    # =============================
+    elif to_date:
+        query = query.filter(
+            TomorrowSpecial.special_date <= to_date
+        )
+
+    # =============================
+    # 🔽 LATEST SPECIAL DATE FIRST
+    # =============================
+    specials = query.order_by(
+        TomorrowSpecial.special_date.desc(),
+        TomorrowSpecial.created_at.desc()
+    ).all()
+
+    result = []
+
+    for special in specials:
+
+        remaining = max(
+            special.max_plates - special.pre_orders,
+            0
+        )
+
+        sold_out = remaining <= 0
+
+        result.append({
+            "id": str(special.id),
+
+            "dish_name": special.dish_name,
+            "description": special.description,
+
+            "price": special.price,
+            "original_price": special.original_price,
+
+            "calories": special.calories,
+            "protein": special.protein,
+            "carbs": special.carbs,
+            "fats": special.fats,
+
+            "preparation_time": special.preparation_time,
+            "ingredients": special.ingredients,
+
+            "image_url": special.image_url,
+            "food_type": special.food_type,
+
+            # 📦 PLATES
+            "max_plates": special.max_plates,
+            "pre_orders": special.pre_orders,
+            "remaining": remaining,
+            "sold_out": sold_out,
+
+            # ⏰ TIMING
+            "cutoff_time": special.cutoff_time,
+            "special_date": (
+                special.special_date.isoformat()
+                if special.special_date
+                else None
+            ),
+
+            # 📊 STATUS
+            "is_active": special.is_active,
+
+            "created_at": (
+                special.created_at.isoformat()
+                if special.created_at
+                else None
+            ),
+        })
+
+    return {
+        "total": len(result),
+        "specials": result
+    }
 
 # =============================
 # 🔥 GET ALL (OPTIMIZED)
@@ -225,7 +390,6 @@ def get_all_specials(db: Session = Depends(get_db)):
        .all()
        )
         
-    updated = False
     data = []
 
     for s in specials:
@@ -233,13 +397,7 @@ def get_all_specials(db: Session = Depends(get_db)):
             continue
 
         remaining = s.max_plates - s.pre_orders
-
-        # 🔥 auto sold out
-        if remaining <= 0:
-            if s.is_active != 0:
-                s.is_active = 0
-                updated = True
-            continue
+        sold_out = remaining <= 0
 
         data.append({
             "id": str(s.id),
@@ -267,9 +425,11 @@ def get_all_specials(db: Session = Depends(get_db)):
             "max_plates": s.max_plates,
             "pre_orders": s.pre_orders,
             "remaining": remaining,
+            "sold_out": sold_out,
 
             # ⏰ Timing
             "cutoff_time": s.cutoff_time,
+            "special_date": s.special_date.isoformat() if s.special_date else None,
 
             # 🖼️ Image
             "image_url": s.image_url,
@@ -286,9 +446,6 @@ def get_all_specials(db: Session = Depends(get_db)):
 
             "created_at": s.created_at.isoformat(),
            })
-        if updated:
-            db.commit()
-
     return data
 
 @router.post("/pre-order")
@@ -314,6 +471,45 @@ def create_pre_order(
         )
     if special.is_active == 0:
         raise HTTPException(status_code=400, detail="Sold out")
+    try:
+        if not special.special_date:
+            raise HTTPException(
+             status_code=400,
+             detail="Special date is not configured"
+            )
+
+        if not special.cutoff_time:
+            raise HTTPException(
+             status_code=400,
+             detail="Special ordering time is not configured"
+            )
+
+        cutoff_datetime = datetime.strptime(
+         f"{special.special_date} {special.cutoff_time}",
+         "%Y-%m-%d %H:%M"
+        ).replace(
+         tzinfo=ZoneInfo("Asia/Kolkata")
+        )
+        current_time = datetime.now(
+          ZoneInfo("Asia/Kolkata")
+        )
+        if current_time >= cutoff_datetime:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                 f"Tomorrow Special ordering closed. "
+                 f"Order by {special.cutoff_time}"
+                )
+            )
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+         status_code=400,
+         detail="Invalid special date or cutoff time"
+        )
 
     remaining = special.max_plates - special.pre_orders
 
@@ -325,10 +521,6 @@ def create_pre_order(
 
     # 🔥 update
     special.pre_orders += data.quantity
-
-    if special.pre_orders >= special.max_plates:
-        special.is_active = 0
-
     db.commit()
     db.refresh(special)
 
@@ -403,9 +595,7 @@ def get_nearby_specials(
                 continue
 
         remaining = s.max_plates - s.pre_orders
-
-        if remaining <= 0:
-            continue
+        sold_out = remaining <= 0
 
         result.append({
             "id": str(s.id),
@@ -433,9 +623,12 @@ def get_nearby_specials(
             "max_plates": s.max_plates,
             "pre_orders": s.pre_orders,
             "remaining": remaining,
+            "sold_out": sold_out,
 
             # ⏰ Timing
             "cutoff_time": s.cutoff_time,
+            "special_date": s.special_date.isoformat() if s.special_date else None,
+            
 
             # 🖼️ Image
             "image_url": s.image_url,

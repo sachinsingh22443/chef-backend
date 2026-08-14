@@ -119,19 +119,18 @@ def add_to_cart(
             ).replace(
                  tzinfo=ZoneInfo("Asia/Kolkata")
             )
-            cutoff_datetime = cutoff_datetime - timedelta(days=1)
 
             current_time = datetime.now(
                ZoneInfo("Asia/Kolkata")
-               )
+            )
 
-            if current_time > cutoff_datetime:
+            if current_time >= cutoff_datetime:
                 raise HTTPException(
-                 status_code=400,
-                 detail=(
-                   f"Tomorrow Special ordering closed. "
-                   f"Order by {special.cutoff_time}"
-                   )
+                   status_code=400,
+                   detail=(
+                     f"Tomorrow Special ordering closed. "
+                     f"Order by {special.cutoff_time}"
+                    )
                 )
 
         except HTTPException:
@@ -274,12 +273,11 @@ def update_cart(
             ).replace(
               tzinfo=ZoneInfo("Asia/Kolkata")
             )
-            cutoff_datetime = cutoff_datetime - timedelta(days=1)
 
             current_time = datetime.now(
                 ZoneInfo("Asia/Kolkata")
             )
-            if current_time > cutoff_datetime:
+            if current_time >= cutoff_datetime:
                 raise HTTPException(
                     status_code=400,
                     detail=(

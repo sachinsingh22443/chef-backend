@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from datetime import datetime
-from datetime import timedelta
+from datetime import timedelta, date
 from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 import os
@@ -106,6 +106,158 @@ def get_my_orders(db: Session = Depends(get_db), user=Depends(get_current_user))
         }
         for order in orders
     ]
+    
+    
+# =========================
+# 🍽️ CUSTOMER - MY SPECIAL HISTORY
+# =========================
+@router.get("/special-history")
+def get_my_special_history(
+    date_filter: date = None,
+    from_date: date = None,
+    to_date: date = None,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+
+    # =========================
+    # 🔎 BASE QUERY
+    # =========================
+    query = (
+        db.query(
+            Order,
+            OrderItem,
+            TomorrowSpecial
+        )
+        .join(
+            OrderItem,
+            OrderItem.order_id == Order.id
+        )
+        .join(
+            TomorrowSpecial,
+            TomorrowSpecial.id == OrderItem.special_id
+        )
+        .filter(
+            Order.user_id == user.id,
+            OrderItem.special_id.isnot(None)
+        )
+    )
+
+    # =========================
+    # 📅 SPECIFIC DATE
+    # =========================
+    if date_filter:
+
+        query = query.filter(
+            TomorrowSpecial.special_date == date_filter
+        )
+
+    # =========================
+    # 📅 DATE RANGE
+    # =========================
+    elif from_date and to_date:
+
+        if from_date > to_date:
+            raise HTTPException(
+                status_code=400,
+                detail="from_date cannot be greater than to_date"
+            )
+
+        query = query.filter(
+            TomorrowSpecial.special_date >= from_date,
+            TomorrowSpecial.special_date <= to_date
+        )
+
+    # =========================
+    # 📅 ONLY FROM DATE
+    # =========================
+    elif from_date:
+
+        query = query.filter(
+            TomorrowSpecial.special_date >= from_date
+        )
+
+    # =========================
+    # 📅 ONLY TO DATE
+    # =========================
+    elif to_date:
+
+        query = query.filter(
+            TomorrowSpecial.special_date <= to_date
+        )
+
+    # =========================
+    # 🔽 LATEST FIRST
+    # =========================
+    rows = query.order_by(
+        TomorrowSpecial.special_date.desc(),
+        Order.created_at.desc()
+    ).all()
+
+    result = []
+
+    for order, item, special in rows:
+
+        result.append({
+            # =========================
+            # 🧾 ORDER
+            # =========================
+            "order_id": str(order.id),
+            "order_status": order.status,
+
+            "ordered_at": (
+                order.created_at.isoformat()
+                if order.created_at
+                else None
+            ),
+
+            # =========================
+            # 🍽️ SPECIAL
+            # =========================
+            "special_id": str(special.id),
+            "dish_name": special.dish_name,
+            "description": special.description,
+
+            "image_url": special.image_url,
+            "food_type": special.food_type,
+
+            # =========================
+            # 📅 SPECIAL DATE
+            # =========================
+            "special_date": (
+                special.special_date.isoformat()
+                if special.special_date
+                else None
+            ),
+
+            "cutoff_time": special.cutoff_time,
+
+            # =========================
+            # 📦 ORDERED QUANTITY
+            # =========================
+            "quantity": item.quantity,
+
+            # OrderItem.price already contains
+            # total price for that item
+            "total": item.price,
+
+            # Per plate price
+            "unit_price": (
+                item.price / item.quantity
+                if item.quantity
+                else 0
+            ),
+
+            # =========================
+            # 👨‍🍳 CHEF
+            # =========================
+            "chef_id": str(special.chef_id),
+        })
+
+    return {
+        "total": len(result),
+        "special_orders": result
+    }
 
 
 # =========================
@@ -315,26 +467,21 @@ async def create_order(
                           detail="Special ordering time is not configured"
                           )
                     cutoff_datetime = datetime.strptime(
-                       f"{special.special_date} {special.cutoff_time}",
-                       "%Y-%m-%d %H:%M"
-                       ).replace(
-                        tzinfo=ZoneInfo("Asia/Kolkata")
+                     f"{special.special_date} {special.cutoff_time}",
+                     "%Y-%m-%d %H:%M"
+                    ).replace(
+                     tzinfo=ZoneInfo("Asia/Kolkata")
                     )
-                    
-                    cutoff_datetime = cutoff_datetime - timedelta(days=1)
-
                     current_time = datetime.now(
-                      ZoneInfo("Asia/Kolkata")
+                        ZoneInfo("Asia/Kolkata")
                     )
-
-                    if current_time > cutoff_datetime:
+                    if current_time >= cutoff_datetime:
                         raise HTTPException(
-                          status_code=400,
-                          detail=(
-                            f"Tomorrow Special ordering closed. "
-                            f"Order by {special.cutoff_time} "
-                            f"on the day before the special."
-                            )
+                         status_code=400,
+                         detail=(
+                          f"Tomorrow Special ordering closed. "
+                          f"Order by {special.cutoff_time}"
+                         )
                         )
 
                 except HTTPException:
@@ -355,10 +502,6 @@ async def create_order(
                     )
 
                 special.pre_orders += item.quantity
-
-                if special.pre_orders >= special.max_plates:
-                    special.is_active = 0
-
                 if not chef_id:
                     chef_id = special.chef_id
                 elif chef_id != special.chef_id:
