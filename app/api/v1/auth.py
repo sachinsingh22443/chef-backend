@@ -2,12 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import os, secrets, smtplib
-
+from pydantic import BaseModel
 from app.models.user import User, ChefProfile
 from app.schemas.auth import ChefLoginSchema, ChangePasswordSchema
 from app.api.deps import get_db, get_current_user
 from app.utils.hashing import hash_password, verify_password
-from app.core.security import create_access_token
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    verify_refresh_token,
+)
 
 import cloudinary.uploader
 from email.mime.text import MIMEText
@@ -113,40 +117,168 @@ async def signup(
 # =========================
 # ✅ LOGIN
 # =========================
+# =========================
+# ✅ LOGIN
+# =========================
 @router.post("/login")
-def login(user_data: ChefLoginSchema, db: Session = Depends(get_db)):
+def login(
+    user_data: ChefLoginSchema,
+    db: Session = Depends(get_db)
+):
 
     user = (
-     db.query(User)
-     .filter(User.email == user_data.email)
-     .limit(1)
-     .first()
+        db.query(User)
+        .filter(User.email == user_data.email)
+        .limit(1)
+        .first()
     )
 
-    if not user or not verify_password(user_data.password, user.password):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+    if not user or not verify_password(
+        user_data.password,
+        user.password
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid credentials"
+        )
 
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account is disabled")
+        raise HTTPException(
+            status_code=403,
+            detail="Account is disabled"
+        )
 
-    # ✅ NEW: role check
+    # =========================
+    # 👨‍🍳 ROLE CHECK
+    # =========================
     if user.role != "chef":
-        raise HTTPException(status_code=403, detail="Not a chef account")
+        raise HTTPException(
+            status_code=403,
+            detail="Not a chef account"
+        )
 
-    # ✅ NEW: approval check
+    # =========================
+    # ✅ APPROVAL CHECK
+    # =========================
     if user.application_status != "approved":
-        raise HTTPException(status_code=403, detail="Your account is under review")
+        raise HTTPException(
+            status_code=403,
+            detail="Your account is under review"
+        )
 
-    # ✅ NEW: role in token
-    token = create_access_token({
+    # =========================
+    # 🔐 ACCESS TOKEN
+    # =========================
+    access_token = create_access_token({
+        "sub": str(user.id),
+        "role": user.role
+    })
+
+    # =========================
+    # 🔄 REFRESH TOKEN
+    # =========================
+    refresh_token = create_refresh_token({
         "sub": str(user.id),
         "role": user.role
     })
 
     return {
-        "access_token": token,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
+        "user_id": str(user.id),
         "application_status": user.application_status
+    }
+    
+    
+# =========================
+# 🔄 REFRESH TOKEN SCHEMA
+# =========================
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+# =========================
+# 🔄 REFRESH ACCESS TOKEN
+# =========================
+@router.post("/refresh")
+def refresh_access_token(
+    data: RefreshTokenRequest,
+    db: Session = Depends(get_db)
+):
+
+    # =========================
+    # 🔐 VERIFY REFRESH TOKEN
+    # =========================
+    payload = verify_refresh_token(
+        data.refresh_token
+    )
+
+    user_id = payload.get("sub")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid refresh token"
+        )
+
+    # =========================
+    # 👤 FIND USER
+    # =========================
+    user = (
+        db.query(User)
+        .filter(User.id == user_id)
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found"
+        )
+
+    # =========================
+    # 🚫 ACCOUNT CHECK
+    # =========================
+    if not user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Account is disabled"
+        )
+
+    if user.role != "chef":
+        raise HTTPException(
+            status_code=403,
+            detail="Not a chef account"
+        )
+
+    if user.application_status != "approved":
+        raise HTTPException(
+            status_code=403,
+            detail="Your account is not approved"
+        )
+
+    # =========================
+    # 🔐 NEW ACCESS TOKEN
+    # =========================
+    access_token = create_access_token({
+        "sub": str(user.id),
+        "role": user.role
+    })
+
+    # =========================
+    # 🔄 NEW REFRESH TOKEN
+    # =========================
+    new_refresh_token = create_refresh_token({
+        "sub": str(user.id),
+        "role": user.role
+    })
+
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "user_id": str(user.id)
     }
 # =========================
 # ✅ UPDATE PROFILE (FIXED)
