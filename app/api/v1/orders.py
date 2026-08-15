@@ -536,24 +536,8 @@ async def create_order(
             total_price = data.amount
         order.total_price = total_price
         order.chef_id = chef_id
-        if data.payment_method == "cod":
-
-            cart = db.query(Cart).filter(
-             Cart.user_id == user.id
-            ).first()
-
-            if cart:
-                db.query(CartItem).filter(
-                 CartItem.cart_id == cart.id
-                ).delete(synchronize_session=False)
-
-                db.delete(cart)
-
-    # Save COD order first
-            db.commit()
-
-        else:
-            db.commit()
+        
+        db.commit()
         if chef_id:
             delete_cache(f"dashboard:{chef_id}")
         db.refresh(order)
@@ -644,6 +628,21 @@ async def confirm_cod_order(
         # =========================
         order.cod_confirmed = True
         order.status = "pending"
+        
+        # =========================
+# 🛒 CLEAR CART AFTER COD CONFIRM
+# =========================
+
+        cart = db.query(Cart).filter(
+           Cart.user_id == order.user_id
+           ).first()
+
+        if cart:
+            db.query(CartItem).filter(
+             CartItem.cart_id == cart.id
+             ).delete(synchronize_session=False)
+
+        db.delete(cart)
 
         # =========================
         # 🔔 CUSTOMER NOTIFICATION
