@@ -252,8 +252,21 @@ def get_my_special_history(
     result = []
 
     for order, item, special in rows:
+        created_at = order.created_at
+
+        if created_at:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(
+                    tzinfo=ZoneInfo("UTC")
+                )
+
+            created_at = created_at.astimezone(
+                ZoneInfo("Asia/Kolkata")
+            )
 
         result.append({
+            
+            
             # =========================
             # 🧾 ORDER
             # =========================
@@ -261,8 +274,8 @@ def get_my_special_history(
             "order_status": order.status,
 
             "ordered_at": (
-                order.created_at.isoformat()
-                if order.created_at
+                created_at.isoformat()
+                if created_at
                 else None
             ),
 
