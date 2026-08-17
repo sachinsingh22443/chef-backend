@@ -135,33 +135,60 @@ def get_chef_orders(
 # ✅ GET ALL ORDERS
 # =========================
 @router.get("/")
-def get_my_orders(db: Session = Depends(get_db), user=Depends(get_current_user)):
+def get_my_orders(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
     orders = (
-     db.query(Order)
-     .options(selectinload(Order.items))
-     .filter(Order.user_id == user.id)
-     .order_by(Order.created_at.desc())
-     .all()
+        db.query(Order)
+        .options(selectinload(Order.items))
+        .filter(Order.user_id == user.id)
+        .order_by(Order.created_at.desc())
+        .all()
     )
 
-    return [
-        {
+    result = []
+
+    for order in orders:
+
+        # 🇮🇳 Convert database UTC time → India time
+        created_at = order.created_at
+
+        if created_at:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(
+                    tzinfo=ZoneInfo("UTC")
+                )
+
+            created_at = created_at.astimezone(
+                ZoneInfo("Asia/Kolkata")
+            )
+
+        result.append({
             "id": str(order.id),
             "status": order.status,
-            "total_price": order.total_price,
-            "created_at": order.created_at,
+            "total_price": float(order.total_price or 0),
+
+            # 🇮🇳 Correct IST time
+            "created_at": (
+                created_at.isoformat()
+                if created_at
+                else None
+            ),
+
             "address": order.address,
+
             "items": [
                 {
                     "name": item.item_name,
-                    "quantity": item.quantity
+                    "quantity": item.quantity,
+                    "price": float(item.price or 0),
                 }
                 for item in order.items
             ]
-        }
-        for order in orders
-    ]
-    
+        })
+
+    return result
     
 # =========================
 # 🍽️ CUSTOMER - MY SPECIAL HISTORY
