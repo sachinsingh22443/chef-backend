@@ -25,56 +25,111 @@ def get_chef_orders(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    orders = (
-     db.query(Order)
-     .options(selectinload(Order.items))
-     .filter(
-       Order.chef_id == user.id,
-       or_(
-        Order.payment_method != "cod",
-        Order.cod_confirmed == True
-       )
-       )
-     .order_by(Order.created_at.desc())
-     .all()
-    )
+    try:
+        orders = (
+            db.query(Order)
+            .options(selectinload(Order.items))
+            .filter(
+                Order.chef_id == user.id
+            )
+            .order_by(Order.created_at.desc())
+            .all()
+        )
 
-    data = []
+        data = []
 
-    for order in orders:
-        data.append({
-            "id": str(order.id),
-            "status": order.status,
-            "total_price": order.total_price,
-            "created_at": order.created_at,
+        for order in orders:
 
-            # 👤 customer info
-            "customer_name": order.customer_name,
-            "phone": order.phone,
-            "address": order.address,
+            # COD order tabhi Chef ko dikhega
+            # jab customer ne COD confirm kiya ho.
+            if (
+                order.payment_method == "cod"
+                and not order.cod_confirmed
+            ):
+                continue
 
-            # 💳 payment
-            "payment_method": order.payment_method,
-            "payment_status": order.payment_status,
+            items = []
 
-            # 📦 items
-            "items": [
-                {
+            for item in order.items:
+
+                items.append({
+                    "id": str(item.id) if item.id else None,
                     "name": item.item_name,
                     "quantity": item.quantity,
-                    "price": item.price,
-                    "image": item.item_image
-                }
-                for item in order.items
-            ]
-        })
+                    "price": float(item.price or 0),
+                    "image": item.item_image,
 
-    return {
-    "total_orders": len([
-    o for o in data if o["status"] != "cancelled"
-]),
-    "orders": data
-}
+                    # 🔥 Tomorrow Special identification
+                    "special_id": (
+                        str(item.special_id)
+                        if item.special_id
+                        else None
+                    ),
+
+                    "menu_id": (
+                        str(item.menu_id)
+                        if item.menu_id
+                        else None
+                    ),
+
+                    "is_tomorrow_special": (
+                        item.special_id is not None
+                    ),
+                })
+
+            data.append({
+                "id": str(order.id),
+
+                "status": order.status,
+
+                "total_price": float(
+                    order.total_price or 0
+                ),
+
+                "created_at": order.created_at,
+
+                # Customer
+                "customer_name": order.customer_name,
+                "phone": order.phone,
+                "address": order.address,
+
+                # Payment
+                "payment_method": order.payment_method,
+                "payment_status": order.payment_status,
+
+                # 🔥 IMPORTANT
+                "cod_confirmed": bool(
+                    order.cod_confirmed
+                ),
+
+                # 🔥 Tomorrow Special flag
+                "is_tomorrow_special": any(
+                    item.special_id is not None
+                    for item in order.items
+                ),
+
+                # Items
+                "items": items,
+            })
+
+        return {
+            "total_orders": len([
+                o for o in data
+                if o["status"] != "cancelled"
+            ]),
+            "orders": data
+        }
+
+    except Exception as e:
+        print(
+            "❌ CHEF ORDERS ERROR:",
+            repr(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch chef orders"
+        )
 
 # =========================
 # ✅ GET ALL ORDERS
@@ -755,10 +810,28 @@ async def confirm_cod_order(
         return {
             "status": "success",
             "message": "COD order confirmed",
+
             "order_id": str(order.id),
+
             "cod_confirmed": True,
-            "total_price": float(order.total_price)
-        }
+
+            "order_status": order.status,
+
+            "chef_id": (
+                str(order.chef_id)
+                if order.chef_id
+                else None
+               ),
+
+            "is_tomorrow_special": any(
+               item.special_id is not None
+               for item in order.items
+            ),
+
+            "total_price": float(
+              order.total_price or 0
+               )
+             }
 
     except HTTPException:
         raise
