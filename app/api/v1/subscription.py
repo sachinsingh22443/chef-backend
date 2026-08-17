@@ -372,33 +372,15 @@ def create_subscription(
     if existing:
         raise HTTPException(400, "Active subscription already exists")
 
-    # ========= CREATE =========
-    # =========================================================
-# BREAKFAST VALIDATION
-# =========================================================
-
-        # ========= CREATE =========
-    # =========================================================
-    # BREAKFAST VALIDATION
-    # =========================================================
-    # =========================================================
-# BREAKFAST PRICE SNAPSHOT
-# =========================================================
-
     breakfast_price = None
 
-    if plan.breakfast_available:
-
-        if not plan.breakfast_price or plan.breakfast_price <= 0:
-            raise HTTPException(
-               status_code=400,
-               detail="Breakfast price is not configured for this plan",
-            )
+    if plan.breakfast_price is not None and plan.breakfast_price > 0:
+        breakfast_price = float(plan.breakfast_price)
 
     # IMPORTANT:
     # Plan ki current breakfast price ko
     # subscription ke andar lock/snapshot kar rahe hain.
-        breakfast_price = float(plan.breakfast_price)
+    breakfast_price = float(plan.breakfast_price)
     
     if data.duration_days not in (7, 15, 30):
         raise HTTPException(
@@ -1345,39 +1327,24 @@ def create_breakfast_payment(
         # PLAN MUST SUPPORT BREAKFAST
         # =========================================
 
-        if not getattr(plan, "breakfast_available", False):
+        if (
+           plan.breakfast_price is None
+           or plan.breakfast_price <= 0
+           ):
             raise HTTPException(
-                status_code=400,
-                detail="Breakfast is not available for this plan",
+             status_code=400,
+             detail="Breakfast is not available for this plan",
             )
-
-        # =========================================
-        # BREAKFAST PRICE
-        # =========================================
-
-        # =========================================
-# LOCKED BREAKFAST PRICE
-# =========================================
-
         if (
             subscription.breakfast_price is None
             or subscription.breakfast_price <= 0
-             ):
-            raise HTTPException(
-               status_code=400,
-               detail="Breakfast price is not configured for this subscription",
+        ):
+            breakfast_price = float(plan.breakfast_price)
+            subscription.breakfast_price = breakfast_price
+        else:
+            breakfast_price = float(
+             subscription.breakfast_price
             )
-
-    # IMPORTANT:
-    # Existing subscription ki locked price use hogi.
-    # Current plan.breakfast_price use nahi karna hai.
-        breakfast_price = float(
-         subscription.breakfast_price
-        )
-
-        # =========================================
-        # CALCULATE REMAINING DAYS
-        # =========================================
 
         today = datetime.now(IST).date()
 
@@ -1645,32 +1612,35 @@ def verify_breakfast_payment(
         # PLAN MUST SUPPORT BREAKFAST
         # =========================================
 
-        if not getattr(plan, "breakfast_available", False):
-            raise HTTPException(
-                status_code=400,
-                detail="Breakfast is not available for this plan",
-            )
-
         # =========================================
-        # BREAKFAST PRICE
-        # =========================================
-
-        # =========================================
-# LOCKED BREAKFAST PRICE
+# BREAKFAST AVAILABILITY + PRICE
 # =========================================
 
         if (
-           subscription.breakfast_price is None
-            or subscription.breakfast_price <= 0
-           ):
-            raise HTTPException(
-             status_code=400,
-             detail="Breakfast price is not configured for this subscription",
-             )
+           plan.breakfast_price is None
+           or plan.breakfast_price <= 0
+        ):
+           raise HTTPException(
+            status_code=400,
+            detail="Breakfast is not available for this plan",
+          )
 
-        breakfast_price = float(
-         subscription.breakfast_price
-        )
+# =========================================
+# USE LOCKED SUBSCRIPTION PRICE
+# =========================================
+
+        if (
+            subscription.breakfast_price is None
+            or subscription.breakfast_price <= 0
+        ):
+            breakfast_price = float(plan.breakfast_price)
+
+            subscription.breakfast_price = breakfast_price
+
+        else:
+            breakfast_price = float(
+              subscription.breakfast_price
+            )
         
         # =========================================
         # VERIFY RAZORPAY SIGNATURE
