@@ -361,39 +361,125 @@ def get_my_special_history(
 from uuid import UUID
 
 @router.get("/{order_id}")
-def get_order(order_id: str, db: Session = Depends(get_db)):
-    # 🔥 UUID VALIDATION
+def get_order(
+    order_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user)
+):
+    # UUID validation
     try:
         order_uuid = UUID(order_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid order ID")
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid order ID"
+        )
 
+    # Customer apna order dekh sakta hai
+    # Chef apne assigned orders dekh sakta hai
     order = (
-     db.query(Order)
-     .options(selectinload(Order.items))
-     .filter(Order.id == order_uuid)
-     .first()
+        db.query(Order)
+        .options(selectinload(Order.items))
+        .filter(
+            Order.id == order_uuid,
+            or_(
+                Order.user_id == user.id,
+                Order.chef_id == user.id,
+            )
+        )
+        .first()
     )
 
     if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+
+    # 🇮🇳 Convert created_at to IST
+    created_at = order.created_at
+
+    if created_at:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(
+                tzinfo=ZoneInfo("UTC")
+            )
+
+        created_at = created_at.astimezone(
+            ZoneInfo("Asia/Kolkata")
+        )
+
     return {
         "id": str(order.id),
+
         "status": order.status,
-        "total_price": order.total_price,
+
+        "total_price": float(
+            order.total_price or 0
+        ),
+
         "customer_name": order.customer_name,
+
         "phone": order.phone,
+
         "address": order.address,
-        "created_at": order.created_at,
+
+        "created_at": (
+            created_at.isoformat()
+            if created_at
+            else None
+        ),
+
+        "payment_method": order.payment_method,
+
+        "payment_status": order.payment_status,
+
+        "cod_confirmed": bool(
+            order.cod_confirmed
+        ),
+
+        # Tomorrow Special order identify
+        "is_tomorrow_special": any(
+            item.special_id is not None
+            for item in order.items
+        ),
 
         "items": [
             {
+                "id": (
+                    str(item.id)
+                    if item.id
+                    else None
+                ),
+
                 "name": item.item_name,
+
                 "quantity": item.quantity,
-                "price": item.price
+
+                "price": float(
+                    item.price or 0
+                ),
+
+                "image": item.item_image,
+
+                "special_id": (
+                    str(item.special_id)
+                    if item.special_id
+                    else None
+                ),
+
+                "menu_id": (
+                    str(item.menu_id)
+                    if item.menu_id
+                    else None
+                ),
+
+                "is_tomorrow_special": (
+                    item.special_id is not None
+                ),
             }
             for item in order.items
-        ]
+        ],
     }
 # =========================
 # ✅ CREATE ORDER
@@ -621,7 +707,9 @@ async def create_order(
                    "name": special.dish_name,
                    "quantity": item.quantity,
                    "price": price,
-                   "image": special.image_url
+                   "image": special.image_url,
+                   "special_id": str(special.id),
+                   "is_tomorrow_special": True,
                 })
 
         # =========================
@@ -641,13 +729,36 @@ async def create_order(
             "id": str(order.id),
             "status": order.status,
             "total_price": order.total_price,
-            "created_at": order.created_at,
+            "created_at": (
+                (
+                    order.created_at.replace(
+                        tzinfo=ZoneInfo("UTC")
+                    )
+                    if order.created_at
+                    and order.created_at.tzinfo is None
+                    else order.created_at
+                )
+                .astimezone(
+                 ZoneInfo("Asia/Kolkata")
+                )
+                .isoformat()
+                if order.created_at
+                else None
+                ),
             "customer_name": order.customer_name,
             "phone": order.phone,
             "address": order.address,
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
-            "items": created_items
+            "items": created_items,
+            "cod_confirmed": bool(
+              order.cod_confirmed
+            ),
+            "is_tomorrow_special": any(
+               item.special_id is not None
+               for item in order.items
+            ),
+            
         }
 
     except HTTPException:
@@ -747,18 +858,25 @@ async def confirm_cod_order(
                 )
             )
         )
-
-        # =========================
-        # CHEF NOTIFICATION
-        # =========================
+        is_tomorrow_special = any(
+           item.special_id is not None
+           for item in order.items
+        )
+        
         db.add(
             Notification(
                 user_id=order.chef_id,
                 type="order",
-                title="New Order Received",
+                title=(
+                   "New Tomorrow Special Order"
+                     if is_tomorrow_special
+                     else "New Order Received"
+                    ),
+
                 message=(
-                    f"You received a COD order "
-                    f"of ₹{order.total_price}"
+                    f"You received a "
+                    f"{'Tomorrow Special ' if is_tomorrow_special else ''}"
+                    f"COD order of ₹{order.total_price}"
                 )
             )
         )
@@ -1088,11 +1206,23 @@ async def verify_payment(
 # 🔔 CHEF NOTIFICATION
 # PAYMENT SUCCESSFUL
 # =========================
+        is_tomorrow_special = any(
+          item.special_id is not None
+          for item in order.items
+        )
         db.add(Notification(
          user_id=order.chef_id,
          type="order",
-         title="New Order Received",
-         message=f"You received a paid order of ₹{order.total_price}"
+         title=(
+            "New Tomorrow Special Order"
+              if is_tomorrow_special
+              else "New Order Received"
+            ),
+         message=(
+            f"You received a "
+            f"{'Tomorrow Special ' if is_tomorrow_special else ''}"
+            f"paid order of ₹{order.total_price}"
+            )
         ))
         order.payment_id = data.get("razorpay_payment_id")
 
