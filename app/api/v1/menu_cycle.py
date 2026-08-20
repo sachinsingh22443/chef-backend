@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_role
@@ -563,19 +563,18 @@ def serialize_menu(menu: Menu):
 # =========================================================
 
 
+
 @router.post(
     "/",
 )
 def create_menu_cycle(
     payload: MenuCycleBulkCreate,
-    cycle_start_date: date = Query(
-        ...,
-        description="First date of the 30-day cycle",
-    ),
     db: Session = Depends(get_db),
     current_user=Depends(require_role(["chef"])),
 ):
     today = today_india()
+
+    cycle_start_date = payload.cycle_start_date
 
     # -----------------------------------------------------
     # Chef must be active + verified
