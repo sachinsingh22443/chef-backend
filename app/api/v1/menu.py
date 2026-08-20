@@ -9,9 +9,136 @@ from uuid import UUID
 from app.models.menu import Menu
 from app.models.order_item import OrderItem
 from app.api.deps import get_db, get_current_user
-from sqlalchemy import func
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from app.api.deps import get_db, get_current_user, require_role
+
+from app.schemas.menu_cycle import (
+    MenuCycleBulkCreate,
+    MenuCycleItemResponse,
+    MenuCycleResponse,
+    MenuDateOverrideCreate,
+    MenuDateOverrideResponse,
+)
+
+from sqlalchemy import func, and_
+
+from app.models.menu_cycle import MenuCycle
+from app.models.menu_date_override import MenuDateOverride
 
 router = APIRouter()
+
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+MENU_CYCLE_DAYS = 30
+CUSTOMER_MENU_DAYS = 7
+
+def get_cycle_menu_for_date(
+    db: Session,
+    chef_id,
+    target_date: date,
+):
+    """
+    Resolve menu for a specific date.
+
+    Priority:
+    1. Date override
+    2. Latest applicable 30-day cycle
+    """
+
+    # =====================================================
+    # 1. DATE OVERRIDE
+    # =====================================================
+
+    override = (
+        db.query(MenuDateOverride)
+        .filter(
+            MenuDateOverride.chef_id == chef_id,
+            MenuDateOverride.menu_date == target_date,
+        )
+        .first()
+    )
+
+    if override:
+        menu = (
+            db.query(Menu)
+            .filter(
+                Menu.id == override.menu_id,
+                Menu.chef_id == chef_id,
+                Menu.is_deleted == False,
+                Menu.is_available == True,
+            )
+            .first()
+        )
+
+        return menu
+
+    # =====================================================
+    # 2. FIND LATEST CYCLE
+    # =====================================================
+
+    cycle_start_result = (
+        db.query(MenuCycle.cycle_start_date)
+        .filter(
+            MenuCycle.chef_id == chef_id,
+            MenuCycle.cycle_start_date <= target_date,
+        )
+        .order_by(
+            MenuCycle.cycle_start_date.desc()
+        )
+        .first()
+    )
+
+    if not cycle_start_result:
+        return None
+
+    cycle_start_date = cycle_start_result[0]
+
+    # =====================================================
+    # 3. CALCULATE CYCLE DAY
+    # =====================================================
+
+    days_elapsed = (
+        target_date - cycle_start_date
+    ).days
+
+    cycle_day = (
+        days_elapsed % MENU_CYCLE_DAYS
+    ) + 1
+
+    # =====================================================
+    # 4. EXACT CYCLE + DAY
+    # =====================================================
+
+    cycle = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == chef_id,
+            MenuCycle.cycle_start_date == cycle_start_date,
+            MenuCycle.cycle_day == cycle_day,
+        )
+        .first()
+    )
+
+    if not cycle:
+        return None
+
+    # =====================================================
+    # 5. FETCH MENU
+    # =====================================================
+
+    menu = (
+        db.query(Menu)
+        .filter(
+            Menu.id == cycle.menu_id,
+            Menu.chef_id == chef_id,
+            Menu.is_deleted == False,
+            Menu.is_available == True,
+        )
+        .first()
+    )
+
+    return menu
 
 # ✅ CREATE MENU
 @router.post("/")
@@ -285,7 +412,154 @@ def get_menus(
 
     return menus
 
+# =========================================================
+# CUSTOMER - CHEF 7 DAY MENU
+# =========================================================
 
+@router.get("/chef/{chef_id}/7-days")
+def get_chef_7_day_menu(
+    chef_id: UUID,
+    start_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Customer ko selected chef ka 7-day menu return karta hai.
+
+    Default:
+        Today -> next 6 days
+
+    Customer:
+        Today       -> can_order=True
+        Tomorrow    -> can_order=False
+        Day 3       -> can_order=False
+        ...
+        Day 7       -> can_order=False
+
+    Har date independently cycle resolver se calculate hoti hai.
+    """
+
+    # =====================================================
+    # CHEF
+    # =====================================================
+
+    chef = (
+        db.query(User)
+        .options(selectinload(User.chef_profile))
+        .filter(
+            User.id == chef_id,
+            User.role == "chef",
+            User.is_active == True,
+        )
+        .first()
+    )
+
+    if not chef:
+        raise HTTPException(
+            status_code=404,
+            detail="Chef not found",
+        )
+
+    # =====================================================
+    # START DATE
+    # =====================================================
+
+    if start_date is None:
+        start_date = datetime.now(INDIA_TZ).date()
+
+    today = datetime.now(INDIA_TZ).date()
+
+    # =====================================================
+    # 7 DAYS
+    # =====================================================
+
+    days = []
+
+    for day_offset in range(CUSTOMER_MENU_DAYS):
+
+        target_date = (
+            start_date + timedelta(days=day_offset)
+        )
+
+        menu = get_cycle_menu_for_date(
+            db=db,
+            chef_id=chef_id,
+            target_date=target_date,
+        )
+
+        is_today = target_date == today
+
+        menu_data = None
+
+        if menu:
+
+            menu_data = {
+                "id": str(menu.id),
+                "chef_id": str(menu.chef_id),
+                "name": menu.name,
+                "description": menu.description,
+                "price": menu.price,
+                "prep_time": menu.prep_time,
+                "quantity": menu.quantity,
+                "category": menu.category,
+                "food_type": menu.food_type,
+                "calories": menu.calories,
+                "protein": menu.protein,
+                "carbs": menu.carbs,
+                "fats": menu.fats,
+                "ingredients": menu.ingredients or [],
+                "image_urls": menu.image_urls or [],
+                "is_available": menu.is_available,
+            }
+
+        days.append({
+            "date": target_date.isoformat(),
+            "day_name": target_date.strftime("%A"),
+            "day_number": day_offset + 1,
+
+            # 🔥 ONLY TODAY CAN BE ORDERED
+            "is_today": is_today,
+            "can_order": bool(
+                is_today and menu is not None
+            ),
+
+            "menu": menu_data,
+        })
+
+    return {
+        "chef": {
+            "id": str(chef.id),
+            "name": chef.name,
+            "bio": (
+                chef.chef_profile.bio
+                if chef.chef_profile
+                else None
+            ),
+            "location": (
+                chef.chef_profile.location
+                if chef.chef_profile
+                else None
+            ),
+            "specialties": (
+                chef.chef_profile.specialties
+                if chef.chef_profile
+                else None
+            ),
+            "profile_image": (
+                chef.chef_profile.profile_image
+                if chef.chef_profile
+                else None
+            ),
+        },
+
+        "start_date": start_date.isoformat(),
+
+        "end_date": (
+            start_date
+            + timedelta(days=CUSTOMER_MENU_DAYS - 1)
+        ).isoformat(),
+
+        "days": days,
+    }
 
 @router.get("/chef/{chef_id}")
 def get_chef_with_menu(
@@ -709,3 +983,380 @@ def get_my_menus(
         .order_by(Menu.name.asc())
         .all()
     )
+    
+    
+
+
+# =========================================================
+# CHEF - CREATE / UPDATE 30 DAY MENU CYCLE
+# =========================================================
+
+@router.post(
+    "/cycle",
+    response_model=MenuCycleResponse,
+)
+def create_or_update_menu_cycle(
+    data: MenuCycleBulkCreate,
+    db: Session = Depends(get_db),
+    user=Depends(require_role(["chef"])),
+):
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
+    if not data.items:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one menu day is required",
+        )
+
+    if len(data.items) > MENU_CYCLE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum 30 days are allowed",
+        )
+
+    # =====================================================
+    # DUPLICATE DAY CHECK
+    # =====================================================
+
+    cycle_days = [
+        item.cycle_day
+        for item in data.items
+    ]
+
+    if len(cycle_days) != len(set(cycle_days)):
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate cycle day is not allowed",
+        )
+
+    # =====================================================
+    # MENU IDS
+    # =====================================================
+
+    menu_ids = [
+        item.menu_id
+        for item in data.items
+    ]
+
+    menus = (
+        db.query(Menu)
+        .filter(
+            Menu.id.in_(menu_ids),
+            Menu.chef_id == user.id,
+            Menu.is_deleted == False,
+        )
+        .all()
+    )
+
+    menu_map = {
+        menu.id: menu
+        for menu in menus
+    }
+
+    # =====================================================
+    # VERIFY MENU OWNERSHIP
+    # =====================================================
+
+    for item in data.items:
+
+        menu = menu_map.get(item.menu_id)
+
+        if not menu:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Menu {item.menu_id} "
+                    "does not belong to this chef"
+                ),
+            )
+
+    # =====================================================
+    # EXISTING CYCLE
+    # =====================================================
+
+    existing_cycles = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == user.id,
+            MenuCycle.cycle_start_date
+            == data.cycle_start_date,
+        )
+        .all()
+    )
+
+    existing_map = {
+        cycle.cycle_day: cycle
+        for cycle in existing_cycles
+    }
+
+    # =====================================================
+    # UPSERT
+    # =====================================================
+
+    for item in data.items:
+
+        existing = existing_map.get(
+            item.cycle_day
+        )
+
+        if existing:
+
+            existing.menu_id = item.menu_id
+
+        else:
+
+            cycle = MenuCycle(
+                chef_id=user.id,
+                menu_id=item.menu_id,
+                cycle_day=item.cycle_day,
+                cycle_start_date=data.cycle_start_date,
+            )
+
+            db.add(cycle)
+
+    # =====================================================
+    # COMMIT
+    # =====================================================
+
+    try:
+
+        db.commit()
+
+    except Exception as e:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save menu cycle",
+        )
+
+    # =====================================================
+    # RETURN COMPLETE CYCLE
+    # =====================================================
+
+    cycles = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == user.id,
+            MenuCycle.cycle_start_date
+            == data.cycle_start_date,
+        )
+        .order_by(
+            MenuCycle.cycle_day.asc()
+        )
+        .all()
+    )
+
+    response_items = []
+
+    for cycle in cycles:
+
+        menu = (
+            db.query(Menu)
+            .filter(
+                Menu.id == cycle.menu_id,
+                Menu.chef_id == user.id,
+            )
+            .first()
+        )
+
+        if not menu:
+            continue
+
+        response_items.append(
+            MenuCycleItemResponse(
+                id=cycle.id,
+                chef_id=cycle.chef_id,
+                menu_id=cycle.menu_id,
+                cycle_day=cycle.cycle_day,
+                cycle_start_date=cycle.cycle_start_date,
+            )
+        )
+
+    return MenuCycleResponse(
+        cycle_start_date=data.cycle_start_date,
+        total_days=len(response_items),
+        items=response_items,
+    )
+    
+    
+# =========================================================
+# CHEF - GET 30 DAY CYCLE
+# =========================================================
+
+@router.get(
+    "/cycle",
+    response_model=MenuCycleResponse,
+)
+def get_menu_cycle(
+    cycle_start_date: date,
+    db: Session = Depends(get_db),
+    user=Depends(require_role(["chef"])),
+):
+    cycles = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == user.id,
+            MenuCycle.cycle_start_date
+            == cycle_start_date,
+        )
+        .order_by(
+            MenuCycle.cycle_day.asc()
+        )
+        .all()
+    )
+
+    if not cycles:
+        raise HTTPException(
+            status_code=404,
+            detail="Menu cycle not found",
+        )
+
+    response_items = []
+
+    for cycle in cycles:
+
+        response_items.append(
+            MenuCycleItemResponse(
+                id=cycle.id,
+                chef_id=cycle.chef_id,
+                menu_id=cycle.menu_id,
+                cycle_day=cycle.cycle_day,
+                cycle_start_date=cycle.cycle_start_date,
+            )
+        )
+
+    return MenuCycleResponse(
+        cycle_start_date=cycle_start_date,
+        total_days=len(response_items),
+        items=response_items,
+    )
+    
+# =========================================================
+# CHEF - DATE OVERRIDE
+# =========================================================
+
+@router.post(
+    "/date-override",
+    response_model=MenuDateOverrideResponse,
+)
+def create_or_update_date_override(
+    data: MenuDateOverrideCreate,
+    db: Session = Depends(get_db),
+    user=Depends(require_role(["chef"])),
+):
+    # =====================================================
+    # VERIFY MENU BELONGS TO CHEF
+    # =====================================================
+
+    menu = (
+        db.query(Menu)
+        .filter(
+            Menu.id == data.menu_id,
+            Menu.chef_id == user.id,
+            Menu.is_deleted == False,
+        )
+        .first()
+    )
+
+    if not menu:
+        raise HTTPException(
+            status_code=404,
+            detail="Menu not found for this chef",
+        )
+
+    # =====================================================
+    # FIND EXISTING OVERRIDE
+    # =====================================================
+
+    override = (
+        db.query(MenuDateOverride)
+        .filter(
+            MenuDateOverride.chef_id == user.id,
+            MenuDateOverride.menu_date
+            == data.menu_date,
+        )
+        .first()
+    )
+
+    if override:
+
+        override.menu_id = data.menu_id
+
+    else:
+
+        override = MenuDateOverride(
+            chef_id=user.id,
+            menu_id=data.menu_id,
+            menu_date=data.menu_date,
+        )
+
+        db.add(override)
+
+    try:
+
+        db.commit()
+        db.refresh(override)
+
+    except Exception:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save menu override",
+        )
+
+    return override
+
+
+
+
+# =========================================================
+# CHEF - DELETE DATE OVERRIDE
+# =========================================================
+
+@router.delete(
+    "/date-override/{override_id}"
+)
+def delete_date_override(
+    override_id: UUID,
+    db: Session = Depends(get_db),
+    user=Depends(require_role(["chef"])),
+):
+    override = (
+        db.query(MenuDateOverride)
+        .filter(
+            MenuDateOverride.id == override_id,
+            MenuDateOverride.chef_id == user.id,
+        )
+        .first()
+    )
+
+    if not override:
+        raise HTTPException(
+            status_code=404,
+            detail="Menu override not found",
+        )
+
+    db.delete(override)
+
+    try:
+
+        db.commit()
+
+    except Exception:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete menu override",
+        )
+
+    return {
+        "message": "Menu override removed successfully"
+    }

@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from app.models.user import User
 from math import radians, cos, sin, asin, sqrt
 from fastapi import Query
-
+from app.api.v1.menu_cycle import get_menu_for_day
 import os
 import base64
 import hmac
@@ -65,30 +65,81 @@ def create_meal_schedules(
     """
     Create meal schedules for every delivery date
     of the subscription.
+
+    Menu is resolved date-wise using:
+    1. Date Override
+    2. 30-day Menu Cycle
+
+    Each meal schedule stores the exact menu_id
+    for that delivery date.
     """
 
-    # Plan ke meals
+    # =====================================================
+    # 1. MEALS
+    # =====================================================
+
     meals = {
-     "lunch",
-     "dinner",
+        "lunch",
+        "dinner",
     }
+
+    # Breakfast only if customer has selected it
     if subscription.breakfast_enabled:
         meals.add("breakfast")
-        
-    # Customer ke selected delivery days
+
+    # =====================================================
+    # 2. CUSTOMER DELIVERY DAYS
+    # =====================================================
+
     delivery_days = {
         day.strip().lower()[:3]
         for day in (subscription.delivery_days or [])
     }
 
+    # =====================================================
+    # 3. SUBSCRIPTION DATE RANGE
+    # =====================================================
+
     current_date = subscription.start_date.date()
     end_date = subscription.end_date.date()
+
+    # =====================================================
+    # 4. CREATE DAILY SCHEDULE
+    # =====================================================
 
     while current_date <= end_date:
 
         weekday = current_date.strftime("%a").lower()
 
+        # Only customer's selected delivery days
         if weekday in delivery_days:
+
+            # =================================================
+            # FIND MENU FOR THIS EXACT DATE
+            # =================================================
+
+            menu, source = get_menu_for_day(
+                db=db,
+                chef_id=subscription.chef_id,
+                target_date=current_date,
+            )
+
+            # =================================================
+            # MENU MUST EXIST
+            # =================================================
+
+            if not menu:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"No menu configured for "
+                        f"{current_date.strftime('%d-%m-%Y')}"
+                    ),
+                )
+
+            # =================================================
+            # CREATE EACH MEAL
+            # =================================================
 
             for meal_type in meals:
 
@@ -99,18 +150,33 @@ def create_meal_schedules(
                     cutoff_time,
                     tzinfo=IST,
                 )
-                
+
+                # =============================================
+                # MEAL PRICE
+                # =============================================
+
                 if meal_type == "breakfast":
-                    meal_price = plan.breakfast_price or 0.0  
+                    meal_price = plan.breakfast_price or 0.0
+
                 elif meal_type == "lunch":
                     meal_price = plan.lunch_price or 0.0
+
                 elif meal_type == "dinner":
                     meal_price = plan.dinner_price or 0.0
+
                 else:
                     meal_price = 0.0
 
+                # =============================================
+                # CREATE SCHEDULE
+                # =============================================
+
                 schedule = SubscriptionMealSchedule(
                     subscription_id=subscription.id,
+
+                    # 🔥 EXACT MENU FOR THIS DATE
+                    menu_id=menu.id,
+
                     date=current_date,
                     meal_type=meal_type,
                     meal_price=meal_price,
@@ -121,8 +187,6 @@ def create_meal_schedules(
                 db.add(schedule)
 
         current_date += timedelta(days=1)
-
-
 # =========================
 # 🔥 GET ALL PLANS (CUSTOMER)
 # =========================
@@ -345,7 +409,16 @@ def create_subscription(
     if data.end_date <= data.start_date:
         raise HTTPException(400, "Invalid date range")
 
-    delivery_days = ALL_DELIVERY_DAYS.copy()
+    delivery_days = [
+    day.strip().lower()[:3]
+    for day in (data.delivery_days or [])
+    ]
+
+    if not delivery_days:
+        raise HTTPException(
+         status_code=400,
+         detail="At least one delivery day is required",
+    )
 
     # ========= GET MENU (🔥 FIX) =========
     menu = db.query(Menu).filter(Menu.id == data.menu_id).first()
@@ -744,12 +817,20 @@ def get_meal_wallet_amount(
 # GET TODAY'S MEAL SCHEDULE
 # =========================================================
 
+# =========================================================
+# GET TODAY'S MEAL SCHEDULE WITH MENU DETAILS
+# =========================================================
+
 @router.get("/{subscription_id}/meals/today")
 def get_today_meals(
     subscription_id: UUID,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # =====================================================
+    # FIND SUBSCRIPTION
+    # =====================================================
+
     subscription = (
         db.query(Subscription)
         .filter(
@@ -765,32 +846,179 @@ def get_today_meals(
             detail="Subscription not found",
         )
 
+    # =====================================================
+    # TODAY
+    # =====================================================
+
     today = datetime.now(IST).date()
+
+    # =====================================================
+    # GET TODAY'S MEAL SCHEDULES
+    # =====================================================
 
     meals = (
         db.query(SubscriptionMealSchedule)
         .filter(
-            SubscriptionMealSchedule.subscription_id == subscription.id,
-            SubscriptionMealSchedule.date == today,
+            SubscriptionMealSchedule.subscription_id
+            == subscription.id,
+
+            SubscriptionMealSchedule.date
+            == today,
         )
-        .order_by(SubscriptionMealSchedule.meal_type)
+        .order_by(
+            SubscriptionMealSchedule.meal_type
+        )
         .all()
     )
 
-    return [
-        {
-            "id": str(meal.id),
-            "subscription_id": str(meal.subscription_id),
-            "date": meal.date,
-            "meal_type": meal.meal_type,
-            "meal_price": meal.meal_price,
-            "status": meal.status,
-            "cutoff_at": meal.cutoff_at,
-            
-        }
-        for meal in meals
-    ]
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
+    result = []
+
+    for meal in meals:
+
+        menu = None
+
+        # =================================================
+        # GET EXACT MENU SAVED FOR THIS DATE
+        # =================================================
+
+        if meal.menu_id:
+
+            menu = (
+                db.query(Menu)
+                .filter(
+                    Menu.id == meal.menu_id,
+                    Menu.chef_id == subscription.chef_id,
+                )
+                .first()
+            )
+
+        # =================================================
+        # MENU DETAILS
+        # =================================================
+
+        result.append({
+
+            # ---------------------------------------------
+            # MEAL
+            # ---------------------------------------------
+
+            "id": str(meal.id),
+
+            "subscription_id": str(
+                meal.subscription_id
+            ),
+
+            "date": meal.date,
+
+            "meal_type": meal.meal_type,
+
+            "status": meal.status,
+
+            "meal_price": meal.meal_price,
+
+            "cutoff_at": meal.cutoff_at,
+
+            # ---------------------------------------------
+            # EXACT MENU
+            # ---------------------------------------------
+
+            "menu_id": (
+                str(menu.id)
+                if menu
+                else None
+            ),
+
+            "menu_name": (
+                menu.name
+                if menu
+                else None
+            ),
+
+            "menu_description": (
+                menu.description
+                if menu
+                else None
+            ),
+
+            "menu_price": (
+                menu.price
+                if menu
+                else None
+            ),
+
+            "menu_category": (
+                menu.category
+                if menu
+                else None
+            ),
+
+            "food_type": (
+                menu.food_type
+                if menu
+                else None
+            ),
+
+            # ---------------------------------------------
+            # NUTRITION
+            # ---------------------------------------------
+
+            "calories": (
+                menu.calories
+                if menu
+                else None
+            ),
+
+            "protein": (
+                menu.protein
+                if menu
+                else None
+            ),
+
+            "carbs": (
+                menu.carbs
+                if menu
+                else None
+            ),
+
+            "fats": (
+                menu.fats
+                if menu
+                else None
+            ),
+
+            # ---------------------------------------------
+            # INGREDIENTS
+            # ---------------------------------------------
+
+            "ingredients": (
+                menu.ingredients
+                if menu
+                else []
+            ),
+
+            # ---------------------------------------------
+            # IMAGES
+            # ---------------------------------------------
+
+            "image_urls": (
+                menu.image_urls
+                if menu
+                else []
+            ),
+
+            "menu_image": (
+                menu.image_urls[0]
+                if menu
+                and menu.image_urls
+                else None
+            ),
+        })
+
+    return result
 
 # =========================================================
 # TURN MEAL OFF
@@ -1609,39 +1837,39 @@ def verify_breakfast_payment(
             )
 
         # =========================================
-        # PLAN MUST SUPPORT BREAKFAST
+        # BREAKFAST AVAILABILITY + PRICE
         # =========================================
-
-        # =========================================
-# BREAKFAST AVAILABILITY + PRICE
-# =========================================
 
         if (
-           plan.breakfast_price is None
-           or plan.breakfast_price <= 0
+            plan.breakfast_price is None
+            or plan.breakfast_price <= 0
         ):
-           raise HTTPException(
-            status_code=400,
-            detail="Breakfast is not available for this plan",
-          )
+            raise HTTPException(
+                status_code=400,
+                detail="Breakfast is not available for this plan",
+            )
 
-# =========================================
-# USE LOCKED SUBSCRIPTION PRICE
-# =========================================
+        # =========================================
+        # USE LOCKED SUBSCRIPTION PRICE
+        # =========================================
 
         if (
             subscription.breakfast_price is None
             or subscription.breakfast_price <= 0
         ):
-            breakfast_price = float(plan.breakfast_price)
+            breakfast_price = float(
+                plan.breakfast_price
+            )
 
-            subscription.breakfast_price = breakfast_price
+            subscription.breakfast_price = (
+                breakfast_price
+            )
 
         else:
             breakfast_price = float(
-              subscription.breakfast_price
+                subscription.breakfast_price
             )
-        
+
         # =========================================
         # VERIFY RAZORPAY SIGNATURE
         # =========================================
@@ -1671,7 +1899,6 @@ def verify_breakfast_payment(
         # =========================================
 
         subscription.breakfast_enabled = True
-
         subscription.breakfast_price = breakfast_price
 
         # =========================================
@@ -1683,6 +1910,8 @@ def verify_breakfast_payment(
         start = subscription.start_date.date()
         end = subscription.end_date.date()
 
+        # Breakfast starts from today if subscription
+        # is already active, otherwise from subscription start.
         calculation_start = max(
             today,
             start,
@@ -1706,10 +1935,12 @@ def verify_breakfast_payment(
 
         for day in subscription.delivery_days or []:
 
-            clean_day = day.strip().title()[:3]
+            clean_day = (
+                day.strip()
+                .title()[:3]
+            )
 
             if clean_day in day_map:
-
                 delivery_weekdays.add(
                     day_map[clean_day]
                 )
@@ -1728,7 +1959,12 @@ def verify_breakfast_payment(
 
         while current_date <= end:
 
+            # Only customer's selected delivery days
             if current_date.weekday() in delivery_weekdays:
+
+                # =========================================
+                # CHECK EXISTING BREAKFAST SCHEDULE
+                # =========================================
 
                 existing = (
                     db.query(
@@ -1750,6 +1986,34 @@ def verify_breakfast_payment(
                 if not existing:
 
                     # =========================================
+                    # GET MENU FOR THIS EXACT DATE
+                    #
+                    # Priority:
+                    # 1. Date override
+                    # 2. 30-day cycle
+                    # 3. Repeating cycle
+                    # =========================================
+
+                    menu, source = get_menu_for_day(
+                        db=db,
+                        chef_id=subscription.chef_id,
+                        target_date=current_date,
+                    )
+
+                    # =========================================
+                    # MENU MUST EXIST
+                    # =========================================
+
+                    if not menu:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"No menu configured for "
+                                f"{current_date.strftime('%d-%m-%Y')}"
+                            ),
+                        )
+
+                    # =========================================
                     # BREAKFAST CUTOFF
                     # =========================================
 
@@ -1759,9 +2023,18 @@ def verify_breakfast_payment(
                         tzinfo=IST,
                     )
 
+                    # =========================================
+                    # CREATE BREAKFAST SCHEDULE
+                    # =========================================
+
                     db.add(
                         SubscriptionMealSchedule(
                             subscription_id=subscription.id,
+
+                            # 🔥 IMPORTANT
+                            # Save exact menu for this date
+                            menu_id=menu.id,
+
                             date=current_date,
                             meal_type="breakfast",
                             meal_price=breakfast_price,

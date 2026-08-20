@@ -35,6 +35,15 @@ class SubscriptionMealSchedule(Base):
         index=True,
     )
 
+    menu_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "menus.id",
+        ),
+        nullable=False,
+        index=True,
+    )
+
     date = Column(
         Date,
         nullable=False,
@@ -45,9 +54,10 @@ class SubscriptionMealSchedule(Base):
         String,
         nullable=False,
     )
+
     meal_price = Column(
-     Float,
-     nullable=False,
+        Float,
+        nullable=False,
     )
 
     status = Column(
@@ -55,10 +65,10 @@ class SubscriptionMealSchedule(Base):
         nullable=False,
         default="on",
     )
-    
+
     cutoff_at = Column(
-      DateTime(timezone=True),
-      nullable=False,
+        DateTime(timezone=True),
+        nullable=False,
     )
 
     created_at = Column(
@@ -83,6 +93,12 @@ class SubscriptionMealSchedule(Base):
         Index(
             "idx_subscription_meal_date",
             "subscription_id",
+            "date",
+        ),
+
+        Index(
+            "idx_subscription_schedule_menu",
+            "menu_id",
             "date",
         ),
     )

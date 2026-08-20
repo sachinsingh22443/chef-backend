@@ -18,6 +18,7 @@ from app.api.v1 import (
     auth,
     users,
     menu as menu_api,
+    menu_cycle,
     dashboard,
     review,
     tomorrow_special,
@@ -95,6 +96,11 @@ app.include_router(
     prefix="/api",
 )
 app.include_router(wallet_router)
+app.include_router(
+    menu_cycle.router,
+    prefix="/menu-cycle",
+    tags=["Menu Cycle"],
+)
 
 
 # ==========================

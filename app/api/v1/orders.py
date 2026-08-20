@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
-from datetime import datetime
-from datetime import timedelta, date
+from app.models.menu_cycle import MenuCycle
+from app.models.menu_date_override import MenuDateOverride
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 import os
@@ -19,6 +20,148 @@ from app.core.razorpay_client import client
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
+
+
+
+# =========================================================
+# 🍽️ MENU CYCLE RESOLVER
+# =========================================================
+
+INDIA_TZ = ZoneInfo("Asia/Kolkata")
+MENU_CYCLE_DAYS = 30
+
+def get_today_menu_for_chef(
+    db: Session,
+    chef_id,
+    requested_menu_id=None,
+    target_date: date | None = None,
+):
+    """
+    Production-safe menu resolver.
+
+    Priority:
+    1. Exact date override
+    2. Latest applicable 30-day cycle
+    3. Automatic 30-day repetition
+
+    Cycle:
+        Day 1  -> cycle_day 1
+        Day 2  -> cycle_day 2
+        ...
+        Day 30 -> cycle_day 30
+        Day 31 -> Day 1
+        Day 32 -> Day 2
+        ...
+
+    Important:
+    Multiple cycles are supported.
+
+    The selected menu is always resolved using:
+
+        chef_id
+        + cycle_start_date
+        + cycle_day
+
+    Past orders are not affected because OrderItem stores
+    item_name, price and image as snapshots.
+    """
+
+    # =====================================================
+    # 0️⃣ TARGET DATE
+    # =====================================================
+
+    if target_date is None:
+        target_date = datetime.now(INDIA_TZ).date()
+
+    # =====================================================
+    # 1️⃣ DATE OVERRIDE HAS HIGHEST PRIORITY
+    # =====================================================
+
+    override = (
+        db.query(MenuDateOverride)
+        .filter(
+            MenuDateOverride.chef_id == chef_id,
+            MenuDateOverride.menu_date == target_date,
+        )
+        .first()
+    )
+
+    if override:
+        return override.menu_id
+
+    # =====================================================
+    # 2️⃣ FIND LATEST CYCLE STARTED ON OR BEFORE TARGET DATE
+    # =====================================================
+
+    active_cycle_start = (
+        db.query(MenuCycle.cycle_start_date)
+        .filter(
+            MenuCycle.chef_id == chef_id,
+            MenuCycle.cycle_start_date <= target_date,
+        )
+        .order_by(
+            MenuCycle.cycle_start_date.desc()
+        )
+        .first()
+    )
+
+    if not active_cycle_start:
+        return None
+
+    cycle_start_date = active_cycle_start[0]
+
+    # =====================================================
+    # 3️⃣ CALCULATE 30-DAY CYCLE DAY
+    # =====================================================
+
+    days_elapsed = (
+        target_date - cycle_start_date
+    ).days
+
+    cycle_day = (
+        days_elapsed % MENU_CYCLE_DAYS
+    ) + 1
+
+    # =====================================================
+    # 4️⃣ FIND MENU FROM EXACT CYCLE
+    #
+    # IMPORTANT:
+    # cycle_start_date MUST be included.
+    #
+    # This prevents:
+    #
+    # Cycle 1 Day 1
+    # Cycle 2 Day 1
+    #
+    # from being confused.
+    # =====================================================
+
+    cycle_menu = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == chef_id,
+            MenuCycle.cycle_start_date == cycle_start_date,
+            MenuCycle.cycle_day == cycle_day,
+        )
+        .first()
+    )
+
+    if not cycle_menu:
+        return None
+
+    # =====================================================
+    # 5️⃣ OPTIONAL REQUESTED MENU VALIDATION
+    #
+    # If caller provided requested_menu_id, return only
+    # the scheduled menu if it matches.
+    # =====================================================
+
+    if requested_menu_id is not None:
+
+        if cycle_menu.menu_id != requested_menu_id:
+            return None
+
+    return cycle_menu.menu_id
 
 @router.get("/chef-orders")
 def get_chef_orders(
@@ -498,60 +641,85 @@ async def create_order(
     user=Depends(get_current_user)
 ):
     try:
-        # =========================
-        # 🔥 VALIDATION
-        # =========================
+        # =====================================================
+        # 🔥 BASIC VALIDATION
+        # =====================================================
+
         if data.payment_method not in ["cod", "card", "upi"]:
-            raise HTTPException(status_code=400, detail="Invalid payment method")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid payment method"
+            )
+
+        if not data.items:
+            raise HTTPException(
+                status_code=400,
+                detail="Order must contain at least one item"
+            )
 
         total_price = 0
         chef_id = None
         created_items = []
-    # =========================
-# 🚀 FETCH ALL SPECIALS IN ONE QUERY
-# =========================
-        special_ids = [item.special_id for item in data.items if item.special_id]
+
+        # =====================================================
+        # 🚀 FETCH ALL SPECIALS IN ONE QUERY
+        # =====================================================
+
+        special_ids = [
+            item.special_id
+            for item in data.items
+            if item.special_id
+        ]
 
         specials = {}
 
         if special_ids:
             special_list = (
-             db.query(TomorrowSpecial)
-             .filter(
-              TomorrowSpecial.id.in_(special_ids),
-              TomorrowSpecial.is_active == 1,
-              )
-             .all()
-              )
+                db.query(TomorrowSpecial)
+                .filter(
+                    TomorrowSpecial.id.in_(special_ids),
+                    TomorrowSpecial.is_active == 1,
+                )
+                .all()
+            )
 
             specials = {
-             special.id: special
-             for special in special_list
+                special.id: special
+                for special in special_list
             }
-        menu_ids = [item.menu_id for item in data.items if item.menu_id]
+
+        # =====================================================
+        # 🚀 FETCH ALL MENUS IN ONE QUERY
+        # =====================================================
+
+        menu_ids = [
+            item.menu_id
+            for item in data.items
+            if item.menu_id
+        ]
 
         menus = {}
 
         if menu_ids:
             menu_list = (
-                    db.query(Menu)
-                    .filter(
-                     Menu.id.in_(menu_ids),
-                     Menu.is_available == True,
-                     Menu.is_deleted == False,
-                    )
-                    .all()
-                    )
-            
+                db.query(Menu)
+                .filter(
+                    Menu.id.in_(menu_ids),
+                    Menu.is_available == True,
+                    Menu.is_deleted == False,
+                )
+                .all()
+            )
+
             menus = {
-                    menu.id: menu
-                    for menu in menu_list
+                menu.id: menu
+                for menu in menu_list
             }
-            
-        
-        # =========================
+
+        # =====================================================
         # 🧾 CREATE ORDER
-        # =========================
+        # =====================================================
+
         order = Order(
             user_id=user.id,
             status="pending",
@@ -564,211 +732,474 @@ async def create_order(
         )
 
         db.add(order)
-        db.flush()  # important for order.id
+        db.flush()
 
-        # =========================
-        # 🔥 LOOP ITEMS
-        # =========================
+        # =====================================================
+        # 🔥 LOOP THROUGH ITEMS
+        # =====================================================
+
         for item in data.items:
 
+            # =================================================
             # ❗ MUST HAVE ONE ID
-            if not item.menu_id and not item.special_id:
-                raise HTTPException(status_code=400, detail="Invalid item")
+            # =================================================
 
-            # =========================
-            # 🍽️ MENU ITEM
-            # =========================
+            if not item.menu_id and not item.special_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid item"
+                )
+
+            if item.menu_id and item.special_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Item cannot contain both menu_id and special_id"
+                )
+
+            # =================================================
+            # 🍽️ NORMAL MENU ITEM
+            # =================================================
+
             if item.menu_id:
 
                 menu = menus.get(item.menu_id)
 
                 if menu is None:
                     raise HTTPException(
-                       status_code=404,
-                       detail="Menu not found"
-                       )
+                        status_code=404,
+                        detail="Menu not found or unavailable"
+                    )
 
-                if not data.is_subscription:
-                    if menu.quantity < item.quantity:
-                        raise HTTPException(status_code=400, detail="Out of stock")
-
-                    menu.quantity -= item.quantity
+                # =============================================
+                # 👨‍🍳 CHEF CONSISTENCY
+                # =============================================
 
                 if not chef_id:
                     chef_id = menu.chef_id
+
                 elif chef_id != menu.chef_id:
-                    raise HTTPException(status_code=400, detail="Different chefs not allowed")
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Different chefs not allowed"
+                    )
+
+                # =============================================
+                # 📅 MENU CYCLE VALIDATION
+                #
+                # Normal customer order:
+                # only today's scheduled menu can be ordered.
+                #
+                # Subscription:
+                # existing subscription flow remains untouched.
+                # =============================================
+
+                if not data.is_subscription:
+
+                    today = datetime.now(
+                        ZoneInfo("Asia/Kolkata")
+                    ).date()
+
+                    scheduled_menu_id = get_today_menu_for_chef(
+                        db=db,
+                        chef_id=menu.chef_id,
+                        requested_menu_id=menu.id,
+                        target_date=today,
+                    )
+
+                    if scheduled_menu_id is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "No menu is scheduled for this chef today"
+                            )
+                        )
+
+                    if scheduled_menu_id != menu.id:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "This menu is not available for ordering today. "
+                                "Please select today's menu."
+                            )
+                        )
+
+                # =============================================
+                # 📦 STOCK
+                # =============================================
+
+                if item.quantity <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Quantity must be greater than zero"
+                    )
+
+                if not data.is_subscription:
+
+                    if menu.quantity is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Menu quantity is not configured"
+                        )
+
+                    if menu.quantity < item.quantity:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Out of stock"
+                        )
+
+                    menu.quantity -= item.quantity
+
+                # =============================================
+                # 💰 PRICE
+                # =============================================
 
                 price = menu.price * item.quantity
+
                 total_price += price
 
-                db.add(OrderItem(
-                    order_id=order.id,
-                    menu_id=menu.id,
-                    quantity=item.quantity,
-                    price=price,
-                    item_name=menu.name,
-                    item_image=menu.image_urls[0] if menu.image_urls else None
-                ))
+                # =============================================
+                # 🧾 ORDER ITEM SNAPSHOT
+                # =============================================
 
-                created_items.append({
-                    "name": menu.name,
-                    "quantity": item.quantity,
-                    "price": price,
-                    "image": menu.image_urls[0] if menu.image_urls else None
-                })
+                db.add(
+                    OrderItem(
+                        order_id=order.id,
+                        menu_id=menu.id,
+                        quantity=item.quantity,
+                        price=price,
+                        item_name=menu.name,
+                        item_image=(
+                            menu.image_urls[0]
+                            if menu.image_urls
+                            else None
+                        )
+                    )
+                )
 
-            # =========================
-            # 🔥 SPECIAL ITEM
-            # =========================
+                created_items.append(
+                    {
+                        "name": menu.name,
+                        "quantity": item.quantity,
+                        "price": price,
+                        "image": (
+                            menu.image_urls[0]
+                            if menu.image_urls
+                            else None
+                        ),
+                        "menu_id": str(menu.id),
+                        "is_tomorrow_special": False,
+                    }
+                )
+
+            # =================================================
+            # 🍽️ TOMORROW SPECIAL
+            # =================================================
+
             elif item.special_id:
+
                 special = specials.get(item.special_id)
 
                 if special is None:
                     raise HTTPException(
-                      status_code=404,
-                      detail="Special not found"
+                        status_code=404,
+                        detail="Special not found or unavailable"
                     )
 
-    # =========================
-    # ⏰ TOMORROW SPECIAL CUTOFF
-    # =========================
-                # =========================
-# ⏰ TOMORROW SPECIAL CUTOFF
-# =========================
+                # =============================================
+                # QUANTITY VALIDATION
+                # =============================================
+
+                if item.quantity <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Quantity must be greater than zero"
+                    )
+
+                # =============================================
+                # ⏰ TOMORROW SPECIAL CUTOFF
+                # =============================================
+
                 try:
+
                     if not special.special_date:
                         raise HTTPException(
-                          status_code=400,
-                          detail="Special date is not configured"
+                            status_code=400,
+                            detail="Special date is not configured"
                         )
+
                     if not special.cutoff_time:
                         raise HTTPException(
-                          status_code=400,
-                          detail="Special ordering time is not configured"
-                          )
+                            status_code=400,
+                            detail=(
+                                "Special ordering time "
+                                "is not configured"
+                            )
+                        )
+
                     cutoff_datetime = datetime.strptime(
-                     f"{special.special_date} {special.cutoff_time}",
-                     "%Y-%m-%d %H:%M"
+                        f"{special.special_date} "
+                        f"{special.cutoff_time}",
+                        "%Y-%m-%d %H:%M"
                     ).replace(
-                     tzinfo=ZoneInfo("Asia/Kolkata")
+                        tzinfo=ZoneInfo("Asia/Kolkata")
                     )
+
                     current_time = datetime.now(
                         ZoneInfo("Asia/Kolkata")
                     )
+
                     if current_time >= cutoff_datetime:
+
                         raise HTTPException(
-                         status_code=400,
-                         detail=(
-                          f"Tomorrow Special ordering closed. "
-                          f"Order by {special.cutoff_time}"
-                         )
+                            status_code=400,
+                            detail=(
+                                "Tomorrow Special ordering closed. "
+                                f"Order by {special.cutoff_time}"
+                            )
                         )
 
                 except HTTPException:
                     raise
 
                 except Exception:
-                    raise HTTPException(
-                       status_code=400,
-                       detail="Invalid special date or cutoff time"
-                      )
 
-                remaining = special.max_plates - special.pre_orders
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Invalid special date "
+                            "or cutoff time"
+                        )
+                    )
+
+                # =============================================
+                # 📦 SPECIAL STOCK
+                # =============================================
+
+                remaining = (
+                    special.max_plates
+                    - special.pre_orders
+                )
 
                 if remaining < item.quantity:
                     raise HTTPException(
-                      status_code=400,
-                      detail="Out of stock"
+                        status_code=400,
+                        detail="Out of stock"
                     )
 
                 special.pre_orders += item.quantity
+
+                # =============================================
+                # 👨‍🍳 CHEF CONSISTENCY
+                # =============================================
+
                 if not chef_id:
+
                     chef_id = special.chef_id
+
                 elif chef_id != special.chef_id:
+
                     raise HTTPException(
-                      status_code=400,
-                      detail="Different chefs not allowed"
+                        status_code=400,
+                        detail="Different chefs not allowed"
                     )
 
-                price = special.price * item.quantity
+                # =============================================
+                # 💰 PRICE
+                # =============================================
+
+                price = (
+                    special.price
+                    * item.quantity
+                )
+
                 total_price += price
 
-                db.add(OrderItem(
-                    order_id=order.id,
-                    special_id=special.id,
-                    quantity=item.quantity,
-                    price=price,
-                    item_name=special.dish_name,
-                    item_image=special.image_url
-                ))
+                # =============================================
+                # 🧾 ORDER ITEM SNAPSHOT
+                # =============================================
 
-                created_items.append({
-                   "name": special.dish_name,
-                   "quantity": item.quantity,
-                   "price": price,
-                   "image": special.image_url,
-                   "special_id": str(special.id),
-                   "is_tomorrow_special": True,
-                })
+                db.add(
+                    OrderItem(
+                        order_id=order.id,
+                        special_id=special.id,
+                        quantity=item.quantity,
+                        price=price,
+                        item_name=special.dish_name,
+                        item_image=special.image_url
+                    )
+                )
 
-        # =========================
-        # 🔥 FINAL UPDATE
-        # =========================
-        if data.is_subscription and data.amount:
+                created_items.append(
+                    {
+                        "name": special.dish_name,
+                        "quantity": item.quantity,
+                        "price": price,
+                        "image": special.image_url,
+                        "special_id": str(
+                            special.id
+                        ),
+                        "is_tomorrow_special": True,
+                    }
+                )
+
+        # =====================================================
+        # ❗ CHEF MUST EXIST
+        # =====================================================
+
+        if chef_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Unable to determine chef"
+            )
+
+        # =====================================================
+        # 🔥 SUBSCRIPTION PRICE
+        # =====================================================
+
+        if data.is_subscription:
+
+            if data.amount is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Subscription order amount is required"
+                    )
+                )
+
+            if data.amount < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid subscription amount"
+                )
+
             total_price = data.amount
+
+        # =====================================================
+        # 🔥 FINAL ORDER UPDATE
+        # =====================================================
+
         order.total_price = total_price
         order.chef_id = chef_id
-        
+
+        # =====================================================
+        # 💾 COMMIT
+        # =====================================================
+
         db.commit()
-        if chef_id:
-            delete_cache(f"dashboard:{chef_id}")
+
+        # =====================================================
+        # 🧹 CHEF DASHBOARD CACHE
+        # =====================================================
+
+        try:
+
+            delete_cache(
+                f"dashboard:{chef_id}"
+            )
+
+        except Exception as cache_error:
+
+            print(
+                "⚠️ DASHBOARD CACHE DELETE ERROR:",
+                str(cache_error)
+            )
+
+        # =====================================================
+        # 🔄 REFRESH
+        # =====================================================
+
         db.refresh(order)
+
+        # =====================================================
+        # 🇮🇳 UTC → INDIA TIME
+        # =====================================================
+
+        created_at = order.created_at
+
+        if created_at:
+
+            if created_at.tzinfo is None:
+
+                created_at = created_at.replace(
+                    tzinfo=ZoneInfo("UTC")
+                )
+
+            created_at = created_at.astimezone(
+                ZoneInfo("Asia/Kolkata")
+            )
+
+        # =====================================================
+        # ✅ RESPONSE
+        # =====================================================
 
         return {
             "id": str(order.id),
+
             "status": order.status,
-            "total_price": order.total_price,
+
+            "total_price": float(
+                order.total_price or 0
+            ),
+
             "created_at": (
-                (
-                    order.created_at.replace(
-                        tzinfo=ZoneInfo("UTC")
-                    )
-                    if order.created_at
-                    and order.created_at.tzinfo is None
-                    else order.created_at
-                )
-                .astimezone(
-                 ZoneInfo("Asia/Kolkata")
-                )
-                .isoformat()
-                if order.created_at
+                created_at.isoformat()
+                if created_at
                 else None
-                ),
+            ),
+
             "customer_name": order.customer_name,
+
             "phone": order.phone,
+
             "address": order.address,
+
             "payment_method": order.payment_method,
+
             "payment_status": order.payment_status,
+
             "items": created_items,
+
             "cod_confirmed": bool(
-              order.cod_confirmed
+                order.cod_confirmed
             ),
+
             "is_tomorrow_special": any(
-               item.special_id is not None
-               for item in order.items
+                item.special_id is not None
+                for item in order.items
             ),
-            
+
+            "chef_id": (
+                str(order.chef_id)
+                if order.chef_id
+                else None
+            ),
         }
 
+    # =========================================================
+    # 🔥 EXPECTED HTTP ERROR
+    # =========================================================
+
     except HTTPException:
+        db.rollback()
         raise
 
+    # =========================================================
+    # ❌ UNEXPECTED ERROR
+    # =========================================================
+
     except Exception as e:
+
         db.rollback()
-        print("❌ ORDER ERROR:", str(e))
-        raise HTTPException(status_code=500, detail="Order creation failed")
-    
+
+        print(
+            "❌ ORDER ERROR:",
+            repr(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Order creation failed"
+        )
     
 # =========================
 # 💵 CONFIRM COD ORDER
@@ -1453,3 +1884,160 @@ def complete_refund(
     db.commit()
 
     return {"msg": "Refund completed"}
+
+
+# =========================================================
+# CUSTOMER - TODAY ORDERS
+# =========================================================
+
+@router.get("/customer/today")
+def get_today_orders(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    today = datetime.now(INDIA_TZ).date()
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.user_id == user.id,
+            func.date(Order.created_at) == today,
+        )
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": str(order.id),
+            "status": order.status,
+            "total_price": order.total_price,
+            "customer_name": order.customer_name,
+            "phone": order.phone,
+            "address": order.address,
+            "payment_method": order.payment_method,
+            "payment_status": order.payment_status,
+            "created_at": (
+                order.created_at.isoformat()
+                if order.created_at
+                else None
+            ),
+            "items": [
+                {
+                    "name": item.item_name,
+                    "quantity": item.quantity,
+                    "price": item.price,
+                    "image": item.item_image,
+                }
+                for item in order.items
+            ],
+        }
+        for order in orders
+    ]
+
+
+# =========================================================
+# CUSTOMER - UPCOMING ORDERS
+# =========================================================
+
+@router.get("/customer/upcoming")
+def get_upcoming_orders(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    today = datetime.now(INDIA_TZ).date()
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.user_id == user.id,
+            func.date(Order.created_at) > today,
+        )
+        .order_by(Order.created_at.asc())
+        .all()
+    )
+
+    return [
+        {
+            "id": str(order.id),
+            "status": order.status,
+            "total_price": order.total_price,
+            "customer_name": order.customer_name,
+            "phone": order.phone,
+            "address": order.address,
+            "payment_method": order.payment_method,
+            "payment_status": order.payment_status,
+            "created_at": (
+                order.created_at.isoformat()
+                if order.created_at
+                else None
+            ),
+            "items": [
+                {
+                    "name": item.item_name,
+                    "quantity": item.quantity,
+                    "price": item.price,
+                    "image": item.item_image,
+                }
+                for item in order.items
+            ],
+        }
+        for order in orders
+    ]
+
+
+# =========================================================
+# CUSTOMER - PAST ORDERS
+# =========================================================
+
+@router.get("/customer/past")
+def get_past_orders(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    today = datetime.now(INDIA_TZ).date()
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.user_id == user.id,
+            func.date(Order.created_at) < today,
+        )
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": str(order.id),
+            "status": order.status,
+            "total_price": order.total_price,
+            "customer_name": order.customer_name,
+            "phone": order.phone,
+            "address": order.address,
+            "payment_method": order.payment_method,
+            "payment_status": order.payment_status,
+            "refund_status": order.refund_status,
+            "refund_amount": order.refund_amount,
+            "refund_date": (
+                order.refund_date.isoformat()
+                if order.refund_date
+                else None
+            ),
+            "created_at": (
+                order.created_at.isoformat()
+                if order.created_at
+                else None
+            ),
+            "items": [
+                {
+                    "name": item.item_name,
+                    "quantity": item.quantity,
+                    "price": item.price,
+                    "image": item.item_image,
+                }
+                for item in order.items
+            ],
+        }
+        for order in orders
+    ]

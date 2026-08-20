@@ -1,17 +1,26 @@
 from datetime import date, datetime, time
 from uuid import UUID
+from datetime import datetime
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_user
 from app.models.subscription import Subscription
-from app.models.subscription_meal_schedule import SubscriptionMealSchedule
+from app.models.subscription_meal_schedule import (
+    SubscriptionMealSchedule,
+)
 from app.schemas.subscription_meal_schedule import (
     MealOffResponse,
     SubscriptionMealScheduleOut,
 )
 
+
+# =========================================================
+# ROUTER
+# =========================================================
 
 router = APIRouter(
     prefix="/subscriptions",
@@ -19,12 +28,27 @@ router = APIRouter(
 )
 
 
+# =========================================================
+# TIMEZONE
+# =========================================================
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+# =========================================================
+# VALID MEALS
+# =========================================================
+
 VALID_MEALS = {
     "breakfast",
     "lunch",
     "dinner",
 }
 
+
+# =========================================================
+# GET ALL SUBSCRIPTION MEALS
+# =========================================================
 
 @router.get(
     "/{subscription_id}/meals",
@@ -35,6 +59,10 @@ def get_subscription_meals(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    # =====================================================
+    # FIND SUBSCRIPTION
+    # =====================================================
+
     subscription = (
         db.query(Subscription)
         .filter(
@@ -50,11 +78,15 @@ def get_subscription_meals(
             detail="Subscription not found",
         )
 
+    # =====================================================
+    # GET ALL MEAL SCHEDULES
+    # =====================================================
+
     meals = (
         db.query(SubscriptionMealSchedule)
         .filter(
             SubscriptionMealSchedule.subscription_id
-            == subscription_id
+            == subscription.id
         )
         .order_by(
             SubscriptionMealSchedule.date,
@@ -66,6 +98,10 @@ def get_subscription_meals(
     return meals
 
 
+# =========================================================
+# TURN TODAY'S MEAL OFF
+# =========================================================
+
 @router.post(
     "/{subscription_id}/meals/{meal_type}/off",
     response_model=MealOffResponse,
@@ -76,21 +112,24 @@ def turn_meal_off(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    # ---------------------------------------------------------
-    # VALIDATE MEAL
-    # ---------------------------------------------------------
+    # =====================================================
+    # VALIDATE MEAL TYPE
+    # =====================================================
 
     meal_type = meal_type.lower().strip()
 
     if meal_type not in VALID_MEALS:
         raise HTTPException(
             status_code=400,
-            detail="Invalid meal type. Use breakfast, lunch or dinner.",
+            detail=(
+                "Invalid meal type. "
+                "Use breakfast, lunch or dinner."
+            ),
         )
 
-    # ---------------------------------------------------------
+    # =====================================================
     # FIND SUBSCRIPTION
-    # ---------------------------------------------------------
+    # =====================================================
 
     subscription = (
         db.query(Subscription)
@@ -107,9 +146,9 @@ def turn_meal_off(
             detail="Subscription not found",
         )
 
-    # ---------------------------------------------------------
+    # =====================================================
     # CHECK SUBSCRIPTION STATUS
-    # ---------------------------------------------------------
+    # =====================================================
 
     if subscription.status != "active":
         raise HTTPException(
@@ -117,82 +156,112 @@ def turn_meal_off(
             detail="Subscription is not active.",
         )
 
-    # ---------------------------------------------------------
-    # CHECK DATE
-    # ---------------------------------------------------------
+    # =====================================================
+    # TODAY IN INDIA
+    # =====================================================
 
-    today = date.today()
+    today = datetime.now(IST).date()
 
-    # ---------------------------------------------------------
+    # =====================================================
     # FIND TODAY'S MEAL
-    # ---------------------------------------------------------
+    # =====================================================
 
     meal = (
         db.query(SubscriptionMealSchedule)
         .filter(
             SubscriptionMealSchedule.subscription_id
-            == subscription_id,
-            SubscriptionMealSchedule.date == today,
+            == subscription.id,
+
+            SubscriptionMealSchedule.date
+            == today,
+
             SubscriptionMealSchedule.meal_type
             == meal_type,
         )
         .first()
     )
 
-    # ---------------------------------------------------------
-    # MEAL DOES NOT EXIST
-    # ---------------------------------------------------------
+    # =====================================================
+    # MEAL NOT SCHEDULED
+    # =====================================================
 
     if not meal:
         raise HTTPException(
             status_code=404,
-            detail=f"{meal_type.capitalize()} is not scheduled for today.",
+            detail=(
+                f"{meal_type.capitalize()} "
+                "is not scheduled for today."
+            ),
         )
 
-    # ---------------------------------------------------------
+    # =====================================================
     # ALREADY OFF
-    # ---------------------------------------------------------
-    # ---------------------------------------------------------
-# CHECK CUTOFF TIME
-# ---------------------------------------------------------
-
-    now = datetime.now()
-
-    cutoff_times = {
-      "breakfast": time(8, 0),
-      "lunch": time(10, 0),
-      "dinner": time(17, 0),
-    }
-
-    cutoff_time = cutoff_times[meal_type]
-
-    if now.time() >= cutoff_time:
-        raise HTTPException(
-         status_code=400,
-         detail=(
-            f"{meal_type.capitalize()} cutoff time has passed. "
-            f"You cannot turn OFF {meal_type} after "
-            f"{cutoff_time.strftime('%I:%M %p')}."
-         ),
-        )
+    # =====================================================
 
     if meal.status == "off":
         raise HTTPException(
             status_code=400,
-            detail=f"{meal_type.capitalize()} is already OFF for today.",
+            detail=(
+                f"{meal_type.capitalize()} "
+                "is already OFF for today."
+            ),
         )
 
-    # ---------------------------------------------------------
+    # =====================================================
+    # USE SERVER-SAVED CUTOFF
+    # =====================================================
+
+    now = datetime.now(IST)
+
+    cutoff_at = meal.cutoff_at
+
+    # =====================================================
+    # NORMALIZE CUTOFF TIMEZONE
+    # =====================================================
+
+    if cutoff_at.tzinfo is None:
+        cutoff_at = cutoff_at.replace(
+            tzinfo=IST
+        )
+    else:
+        cutoff_at = cutoff_at.astimezone(IST)
+
+    # =====================================================
+    # CUTOFF CHECK
+    # =====================================================
+
+    if now >= cutoff_at:
+        cutoff_display = cutoff_at.strftime(
+            "%I:%M %p"
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{meal_type.capitalize()} cutoff time "
+                f"has passed. You cannot turn OFF "
+                f"{meal_type} after {cutoff_display}."
+            ),
+        )
+
+    # =====================================================
     # TURN OFF
-    # ---------------------------------------------------------
+    # =====================================================
 
     meal.status = "off"
 
     db.commit()
     db.refresh(meal)
 
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
     return MealOffResponse(
-        message=f"{meal_type.capitalize()} has been turned OFF for today.",
+        message=(
+            f"{meal_type.capitalize()} "
+            "has been turned OFF for today."
+        ),
         subscription_id=subscription_id,
         date=today,
         meal_type=meal_type,
