@@ -6,8 +6,10 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
+    Date,
     Index,
 )
+
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -46,8 +48,25 @@ class CartItem(Base):
     __tablename__ = "cart_items"
 
     __table_args__ = (
-        Index("idx_cartitem_cart_menu", "cart_id", "menu_id"),
-        Index("idx_cartitem_cart_special", "cart_id", "special_id"),
+        Index(
+            "idx_cartitem_cart_menu",
+            "cart_id",
+            "menu_id",
+        ),
+        Index(
+            "idx_cartitem_cart_special",
+            "cart_id",
+            "special_id",
+        ),
+        Index(
+            "idx_cartitem_menu_date",
+            "menu_id",
+            "menu_date",
+        ),
+        Index(
+            "idx_cartitem_meal_type",
+            "meal_type",
+        ),
     )
 
     id = Column(
@@ -80,19 +99,55 @@ class CartItem(Base):
     quantity = Column(
         Integer,
         default=1,
+        nullable=False,
     )
 
-    # Snapshot
-    name = Column(String)
+    # =====================================================
+    # SNAPSHOT
+    # =====================================================
 
-    price = Column(Float)
+    name = Column(
+        String,
+        nullable=True,
+    )
 
-    image = Column(String)
+    price = Column(
+        Float,
+        nullable=True,
+    )
+
+    image = Column(
+        String,
+        nullable=True,
+    )
 
     food_type = Column(
         String,
         index=True,
+        nullable=True,
     )
+
+    # =====================================================
+    # NORMAL MENU CYCLE
+    # =====================================================
+
+    # The actual date for which customer is ordering
+    menu_date = Column(
+        Date,
+        nullable=True,
+        index=True,
+    )
+
+    # breakfast / lunch / dinner
+    meal_type = Column(
+        String,
+        nullable=True,
+        index=True,
+    )
+
+    # =====================================================
+    # RELATIONSHIP
+    # =====================================================
 
     cart = relationship(
         "Cart",
