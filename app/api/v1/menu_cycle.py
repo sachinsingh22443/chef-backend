@@ -826,7 +826,6 @@ def get_menu_cycles(
     grouped = {}
 
     for cycle in cycles:
-
         key = cycle.cycle_start_date.isoformat()
 
         if key not in grouped:
@@ -835,22 +834,17 @@ def get_menu_cycles(
                 "cycle_end_date": get_cycle_end_date(
                     cycle.cycle_start_date
                 ),
-                "days": [],
+                "items": [],
             }
 
-        grouped[key]["days"].append(
-            MenuCycleItemResponse.model_validate(
-                cycle
-            )
+        grouped[key]["items"].append(
+            MenuCycleItemResponse.model_validate(cycle)
         )
 
     return {
         "success": True,
-        "cycles": list(
-            grouped.values()
-        ),
+        "cycles": list(grouped.values()),
     }
-
 
 # =========================================================
 # CHEF
@@ -903,7 +897,299 @@ def get_single_cycle(
 # CHEF
 # UPDATE ONE DAY OF A FUTURE CYCLE
 # =========================================================
+# =========================================================
+# CHEF
+# UPDATE COMPLETE FUTURE 30-DAY CYCLE
+# =========================================================
 
+@router.put(
+    "/cycle/{cycle_start_date}",
+)
+def update_menu_cycle(
+    cycle_start_date: date,
+    payload: MenuCycleBulkCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(["chef"])),
+):
+    today = today_india()
+
+    # -----------------------------------------------------
+    # CHEF VALIDATION
+    # -----------------------------------------------------
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Chef account is inactive",
+        )
+
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Chef account is not verified",
+        )
+
+    # -----------------------------------------------------
+    # ONLY FUTURE CYCLE CAN BE UPDATED
+    # -----------------------------------------------------
+
+    if cycle_start_date <= today:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Started or completed cycles cannot be modified."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # BODY START DATE MUST MATCH URL
+    # -----------------------------------------------------
+
+    if payload.cycle_start_date != cycle_start_date:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "cycle_start_date in URL and body must match"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # VALIDATE 90 ITEMS
+    # -----------------------------------------------------
+
+    validate_cycle_items(payload.items)
+
+    # -----------------------------------------------------
+    # VERIFY ALL MENUS BELONG TO CHEF
+    # -----------------------------------------------------
+
+    menu_ids = [
+        item.menu_id
+        for item in payload.items
+    ]
+
+    validate_chef_menus(
+        db=db,
+        chef_id=current_user.id,
+        menu_ids=menu_ids,
+    )
+
+    # -----------------------------------------------------
+    # FIND EXISTING CYCLE
+    # -----------------------------------------------------
+
+    existing_rows = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == current_user.id,
+            MenuCycle.cycle_start_date == cycle_start_date,
+        )
+        .all()
+    )
+
+    if not existing_rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Menu cycle not found",
+        )
+
+    # -----------------------------------------------------
+    # CREATE LOOKUP
+    # -----------------------------------------------------
+
+    existing_map = {
+        (
+            row.cycle_day,
+            row.meal_type.lower().strip(),
+        ): row
+        for row in existing_rows
+    }
+
+    payload_map = {
+        (
+            item.cycle_day,
+            item.meal_type.lower().strip(),
+        ): item
+        for item in payload.items
+    }
+
+    # -----------------------------------------------------
+    # UPDATE EXISTING 90 RECORDS
+    #
+    # IMPORTANT:
+    # We DO NOT delete/recreate rows.
+    #
+    # This keeps the same MenuCycle records and only
+    # changes their menu_id / meal_type data.
+    #
+    # Orders and carts are NOT touched.
+    # -----------------------------------------------------
+
+    try:
+        for key, row in existing_map.items():
+
+            item = payload_map.get(key)
+
+            if not item:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Missing cycle entry for "
+                        f"Day {row.cycle_day} "
+                        f"{row.meal_type}"
+                    ),
+                )
+
+            row.menu_id = item.menu_id
+            row.meal_type = (
+                item.meal_type.lower().strip()
+            )
+
+        # -------------------------------------------------
+        # SAFETY CHECK
+        # -------------------------------------------------
+
+        if len(existing_map) != 90:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Existing cycle is incomplete. "
+                    "Expected 90 menu entries."
+                ),
+            )
+
+        db.commit()
+
+        # -------------------------------------------------
+        # REFRESH
+        # -------------------------------------------------
+
+        for row in existing_rows:
+            db.refresh(row)
+
+        return {
+            "success": True,
+            "message": (
+                "Future 30-day menu cycle "
+                "updated successfully"
+            ),
+            "cycle_start_date": cycle_start_date,
+            "cycle_end_date": get_cycle_end_date(
+                cycle_start_date
+            ),
+            "days": [
+                MenuCycleItemResponse.model_validate(row)
+                for row in sorted(
+                    existing_rows,
+                    key=lambda x: (
+                        x.cycle_day,
+                        x.meal_type,
+                    ),
+                )
+            ],
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except Exception:
+        db.rollback()
+        raise
+    
+    
+    
+# =========================================================
+# CHEF
+# DELETE COMPLETE FUTURE 30-DAY CYCLE
+# =========================================================
+
+@router.delete(
+    "/cycle/{cycle_start_date}",
+)
+def delete_menu_cycle(
+    cycle_start_date: date,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(["chef"])),
+):
+    today = today_india()
+
+    # -----------------------------------------------------
+    # CHEF VALIDATION
+    # -----------------------------------------------------
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Chef account is inactive",
+        )
+
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Chef account is not verified",
+        )
+
+    # -----------------------------------------------------
+    # NEVER DELETE STARTED / CURRENT / PAST CYCLE
+    # -----------------------------------------------------
+
+    if cycle_start_date <= today:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Started or completed cycles cannot be deleted."
+            ),
+        )
+
+    # -----------------------------------------------------
+    # FIND CYCLE
+    # -----------------------------------------------------
+
+    cycle_rows = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == current_user.id,
+            MenuCycle.cycle_start_date == cycle_start_date,
+        )
+        .all()
+    )
+
+    if not cycle_rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Menu cycle not found",
+        )
+
+    # -----------------------------------------------------
+    # DELETE ONLY MENU CYCLE RECORDS
+    #
+    # IMPORTANT:
+    # Orders are NOT deleted.
+    # Cart is NOT deleted.
+    # Menu records are NOT deleted.
+    # -----------------------------------------------------
+
+    try:
+        deleted_count = len(cycle_rows)
+
+        for row in cycle_rows:
+            db.delete(row)
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": (
+                "Future menu cycle deleted successfully"
+            ),
+            "cycle_start_date": cycle_start_date,
+            "deleted_entries": deleted_count,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
 
 @router.put(
     "/cycle/{cycle_start_date}/day/{cycle_day}/{meal_type}",
