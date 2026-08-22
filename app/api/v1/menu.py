@@ -37,19 +37,30 @@ def get_cycle_menu_for_date(
     db: Session,
     chef_id,
     target_date: date,
+    meal_type: str,
 ):
     """
-    Resolve menu for a specific date.
+    Resolve menu for a specific date + meal type.
 
     Priority:
     1. Date override
     2. Latest applicable 30-day cycle
     """
 
+    meal_type = meal_type.lower().strip()
+
+    allowed_meals = {"breakfast", "lunch", "dinner"}
+
+    if meal_type not in allowed_meals:
+        return None
+
     # =====================================================
     # 1. DATE OVERRIDE
     # =====================================================
 
+    # IMPORTANT:
+    # Current MenuDateOverride model is date-only.
+    # Therefore we keep override behavior unchanged.
     override = (
         db.query(MenuDateOverride)
         .filter(
@@ -71,10 +82,11 @@ def get_cycle_menu_for_date(
             .first()
         )
 
-        return menu
+        if menu:
+            return menu
 
     # =====================================================
-    # 2. FIND LATEST CYCLE
+    # 2. FIND LATEST APPLICABLE CYCLE
     # =====================================================
 
     cycle_start_result = (
@@ -107,7 +119,7 @@ def get_cycle_menu_for_date(
     ) + 1
 
     # =====================================================
-    # 4. EXACT CYCLE + DAY
+    # 4. EXACT CYCLE + DAY + MEAL TYPE
     # =====================================================
 
     cycle = (
@@ -116,6 +128,7 @@ def get_cycle_menu_for_date(
             MenuCycle.chef_id == chef_id,
             MenuCycle.cycle_start_date == cycle_start_date,
             MenuCycle.cycle_day == cycle_day,
+            MenuCycle.meal_type == meal_type,
         )
         .first()
     )
@@ -416,39 +429,50 @@ def get_menus(
 # CUSTOMER - CHEF 7 DAY MENU
 # =========================================================
 
+# =========================================================
+# CUSTOMER - CHEF 7 DAY MENU
+# =========================================================
+
 @router.get("/chef/{chef_id}/7-days")
 def get_chef_7_day_menu(
     chef_id: UUID,
-    start_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
     """
-    Customer ko selected chef ka 7-day menu return karta hai.
+    CUSTOMER
 
-    Default:
-        Today -> next 6 days
+    Returns:
+        Today + next 6 days
 
-    Customer:
-        Today       -> can_order=True
-        Tomorrow    -> can_order=False
-        Day 3       -> can_order=False
-        ...
-        Day 7       -> can_order=False
+    Each day:
+        breakfast
+        lunch
+        dinner
 
-    Har date independently cycle resolver se calculate hoti hai.
+    Rules:
+        - Only 7 days are returned
+        - Today's meals can be ordered before cutoff
+        - Future meals are visible
+        - Future meals cannot be ordered
+        - Menu is resolved from the chef's cycle
     """
 
     # =====================================================
-    # CHEF
+    # INDIA DATE / TIME
+    # =====================================================
+
+    today = datetime.now(INDIA_TZ).date()
+    now = datetime.now(INDIA_TZ)
+
+    # =====================================================
+    # VERIFY CHEF
     # =====================================================
 
     chef = (
         db.query(User)
-        .options(selectinload(User.chef_profile))
         .filter(
             User.id == chef_id,
             User.role == "chef",
-            User.is_active == True,
         )
         .first()
     )
@@ -460,107 +484,189 @@ def get_chef_7_day_menu(
         )
 
     # =====================================================
-    # START DATE
-    # =====================================================
-
-    if start_date is None:
-        start_date = datetime.now(INDIA_TZ).date()
-
-    today = datetime.now(INDIA_TZ).date()
-
-    # =====================================================
-    # 7 DAYS
+    # BUILD 7 DAYS
     # =====================================================
 
     days = []
 
-    for day_offset in range(CUSTOMER_MENU_DAYS):
+    for offset in range(CUSTOMER_MENU_DAYS):
 
-        target_date = (
-            start_date + timedelta(days=day_offset)
-        )
+        target_date = today + timedelta(days=offset)
 
-        menu = get_cycle_menu_for_date(
-            db=db,
-            chef_id=chef_id,
-            target_date=target_date,
-        )
+        meals = []
 
-        is_today = target_date == today
+        # =================================================
+        # BREAKFAST / LUNCH / DINNER
+        # =================================================
 
-        menu_data = None
+        for meal_type in (
+            "breakfast",
+            "lunch",
+            "dinner",
+        ):
 
-        if menu:
+            # ---------------------------------------------
+            # GET MENU
+            # ---------------------------------------------
 
-            menu_data = {
-                "id": str(menu.id),
-                "chef_id": str(menu.chef_id),
-                "name": menu.name,
-                "description": menu.description,
-                "price": menu.price,
-                "prep_time": menu.prep_time,
-                "quantity": menu.quantity,
-                "category": menu.category,
-                "food_type": menu.food_type,
-                "calories": menu.calories,
-                "protein": menu.protein,
-                "carbs": menu.carbs,
-                "fats": menu.fats,
-                "ingredients": menu.ingredients or [],
-                "image_urls": menu.image_urls or [],
-                "is_available": menu.is_available,
+            menu = get_cycle_menu_for_date(
+                db=db,
+                chef_id=chef_id,
+                target_date=target_date,
+                meal_type=meal_type,
+            )
+
+            # ---------------------------------------------
+            # CUTOFF TIME
+            # ---------------------------------------------
+
+            cutoff_times = {
+                "breakfast": (9, 0),
+                "lunch": (13, 0),
+                "dinner": (20, 0),
             }
 
-        days.append({
-            "date": target_date.isoformat(),
-            "day_name": target_date.strftime("%A"),
-            "day_number": day_offset + 1,
+            cutoff_hour, cutoff_minute = (
+                cutoff_times[meal_type]
+            )
 
-            # 🔥 ONLY TODAY CAN BE ORDERED
-            "is_today": is_today,
-            "can_order": bool(
-                is_today and menu is not None
-            ),
+            cutoff_at = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                cutoff_hour,
+                cutoff_minute,
+                tzinfo=INDIA_TZ,
+            )
 
-            "menu": menu_data,
-        })
+            # ---------------------------------------------
+            # STATUS
+            # ---------------------------------------------
+
+            if menu is None:
+
+                meal_status = "not_available"
+                can_order = False
+
+            elif target_date > today:
+
+                meal_status = "upcoming"
+                can_order = False
+
+            elif now >= cutoff_at:
+
+                meal_status = "cutoff_passed"
+                can_order = False
+
+            elif not menu.is_available:
+
+                meal_status = "out_of_stock"
+                can_order = False
+
+            elif menu.quantity is None or menu.quantity <= 0:
+
+                meal_status = "out_of_stock"
+                can_order = False
+
+            else:
+
+                meal_status = "available"
+                can_order = True
+
+            # ---------------------------------------------
+            # SERIALIZE MENU
+            # ---------------------------------------------
+
+            menu_data = None
+
+            if menu:
+
+                menu_data = {
+                    "id": str(menu.id),
+                    "chef_id": str(menu.chef_id),
+                    "name": menu.name,
+                    "description": menu.description,
+                    "price": menu.price,
+                    "prep_time": menu.prep_time,
+                    "quantity": menu.quantity,
+                    "category": menu.category,
+                    "food_type": menu.food_type,
+                    "calories": menu.calories,
+                    "protein": menu.protein,
+                    "carbs": menu.carbs,
+                    "fats": menu.fats,
+                    "ingredients": menu.ingredients,
+                    "image_urls": menu.image_urls,
+                    "is_available": menu.is_available,
+                }
+
+            # ---------------------------------------------
+            # MEAL RESPONSE
+            # ---------------------------------------------
+
+            meals.append(
+                {
+                    "meal_type": meal_type,
+
+                    "cutoff_time": (
+                        f"{cutoff_hour:02d}:"
+                        f"{cutoff_minute:02d}"
+                    ),
+
+                    "meal_status": meal_status,
+
+                    "can_order": can_order,
+
+                    "menu": menu_data,
+                }
+            )
+
+        # =================================================
+        # DAY RESPONSE
+        # =================================================
+
+        days.append(
+            {
+                "date": target_date,
+
+                "is_today": (
+                    target_date == today
+                ),
+
+                "is_past": (
+                    target_date < today
+                ),
+
+                "is_upcoming": (
+                    target_date > today
+                ),
+
+                "meals": meals,
+            }
+        )
+
+    # =====================================================
+    # FINAL RESPONSE
+    # =====================================================
 
     return {
-        "chef": {
-            "id": str(chef.id),
-            "name": chef.name,
-            "bio": (
-                chef.chef_profile.bio
-                if chef.chef_profile
-                else None
-            ),
-            "location": (
-                chef.chef_profile.location
-                if chef.chef_profile
-                else None
-            ),
-            "specialties": (
-                chef.chef_profile.specialties
-                if chef.chef_profile
-                else None
-            ),
-            "profile_image": (
-                chef.chef_profile.profile_image
-                if chef.chef_profile
-                else None
-            ),
-        },
+        "success": True,
 
-        "start_date": start_date.isoformat(),
+        "chef_id": str(chef_id),
+
+        "start_date": today,
 
         "end_date": (
-            start_date
-            + timedelta(days=CUSTOMER_MENU_DAYS - 1)
-        ).isoformat(),
+            today
+            + timedelta(
+                days=CUSTOMER_MENU_DAYS - 1
+            )
+        ),
 
         "days": days,
     }
-
+    
+    
 @router.get("/chef/{chef_id}")
 def get_chef_with_menu(
     chef_id: UUID,
