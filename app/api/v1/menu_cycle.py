@@ -1,11 +1,18 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, time
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
+from sqlalchemy import or_
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_role
 from app.core.timezone import today_india
+# =========================================================
+# INDIA TIMEZONE
+# =========================================================
+
+IST = ZoneInfo("Asia/Kolkata")
 from app.models.menu import Menu
 from app.models.menu_cycle import MenuCycle
 from app.models.menu_date_override import MenuDateOverride
@@ -21,7 +28,22 @@ from app.schemas.menu_cycle import (
 
 router = APIRouter()
 
+# =========================================================
+# MEAL CONFIGURATION
+# =========================================================
 
+VALID_MEALS = {
+    "breakfast",
+    "lunch",
+    "dinner",
+}
+
+
+MEAL_CUTOFF_TIMES = {
+    "breakfast": time(8, 30),
+    "lunch": time(11, 0),
+    "dinner": time(18, 0),
+}
 # =========================================================
 # HELPERS
 # =========================================================
@@ -87,34 +109,122 @@ def validate_cycle_items(
     items,
 ) -> None:
     """
-    Validate that exactly 30 unique days are provided.
+    Validate that exactly 30 days × 3 meals
+    are provided.
+
+    Total required entries = 90.
+
+    Day 1:
+        breakfast
+        lunch
+        dinner
+
+    ...
+
+    Day 30:
+        breakfast
+        lunch
+        dinner
     """
 
-    if len(items) != 30:
+    # -----------------------------------------------------
+    # EXACTLY 90 RECORDS
+    # -----------------------------------------------------
+
+    if len(items) != 90:
         raise HTTPException(
             status_code=400,
-            detail="Exactly 30 menu days are required",
+            detail=(
+                "Exactly 90 menu entries are required "
+                "(30 days × 3 meals)"
+            ),
         )
 
-    cycle_days = [
-        item.cycle_day
-        for item in items
-    ]
+    # -----------------------------------------------------
+    # VALIDATE EACH ITEM
+    # -----------------------------------------------------
 
-    if len(set(cycle_days)) != 30:
+    combinations = set()
+
+    for item in items:
+
+        # -------------------------------
+        # DAY
+        # -------------------------------
+
+        if item.cycle_day < 1 or item.cycle_day > 30:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "cycle_day must be between 1 and 30"
+                ),
+            )
+
+        # -------------------------------
+        # MEAL TYPE
+        # -------------------------------
+
+        meal_type = (
+            item.meal_type
+            .lower()
+            .strip()
+        )
+
+        if meal_type not in VALID_MEALS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid meal_type. "
+                    "Use breakfast, lunch or dinner."
+                ),
+            )
+
+        # -------------------------------
+        # DUPLICATE CHECK
+        # -------------------------------
+
+        key = (
+            item.cycle_day,
+            meal_type,
+        )
+
+        if key in combinations:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Duplicate entry for "
+                    f"Day {item.cycle_day} "
+                    f"{meal_type}"
+                ),
+            )
+
+        combinations.add(key)
+
+    # -----------------------------------------------------
+    # EXPECTED 90 COMBINATIONS
+    # -----------------------------------------------------
+
+    expected_combinations = {
+        (
+            day,
+            meal,
+        )
+        for day in range(1, 31)
+        for meal in VALID_MEALS
+    }
+
+    # -----------------------------------------------------
+    # FINAL CHECK
+    # -----------------------------------------------------
+
+    if combinations != expected_combinations:
         raise HTTPException(
             status_code=400,
-            detail="Duplicate cycle_day values are not allowed",
+            detail=(
+                "Cycle must contain breakfast, lunch "
+                "and dinner for every day from 1 to 30."
+            ),
         )
-
-    expected_days = set(range(1, 31))
-
-    if set(cycle_days) != expected_days:
-        raise HTTPException(
-            status_code=400,
-            detail="Cycle must contain every day from 1 to 30",
-        )
-
 
 def validate_chef_menus(
     db: Session,
@@ -417,19 +527,33 @@ def get_menu_for_day(
     db: Session,
     chef_id: UUID,
     target_date: date,
+    meal_type: str,
 ):
     """
-    Resolve final menu.
+    Resolve final menu for a specific date + meal.
 
     Priority:
 
-        1. Date override
-        2. Explicit configured cycle
-        3. Automatic repeating cycle
+    1. Date override
+    2. Explicit configured cycle
+    3. Automatic repeating cycle
     """
 
     # -----------------------------------------------------
+    # NORMALIZE MEAL
+    # -----------------------------------------------------
+
+    meal_type = meal_type.lower().strip()
+
+    if meal_type not in VALID_MEALS:
+        return None, None
+
+    # -----------------------------------------------------
     # 1. DATE OVERRIDE
+    #
+    # NOTE:
+    # Current MenuDateOverride model is date-only,
+    # so existing override applies to the date.
     # -----------------------------------------------------
 
     override = (
@@ -470,19 +594,17 @@ def get_menu_for_day(
         return None, None
 
     # -----------------------------------------------------
-    # 3. FIND MENU FOR THAT DAY
-    #
-    # Important:
-    # For automatic repeat, we use the cycle's template
-    # and the calculated repeated cycle_day.
+    # 3. FIND MENU FOR DAY + MEAL
     # -----------------------------------------------------
 
     cycle_item = (
         db.query(MenuCycle)
         .filter(
             MenuCycle.chef_id == chef_id,
-            MenuCycle.cycle_start_date == cycle.cycle_start_date,
+            MenuCycle.cycle_start_date
+            == cycle.cycle_start_date,
             MenuCycle.cycle_day == cycle_day,
+            MenuCycle.meal_type == meal_type,
         )
         .first()
     )
@@ -508,10 +630,7 @@ def get_menu_for_day(
         return None, None
 
     # -----------------------------------------------------
-    # Determine source.
-    #
-    # If target date falls outside stored cycle range,
-    # it is an automatic repeat.
+    # DETERMINE SOURCE
     # -----------------------------------------------------
 
     actual_cycle_end = get_cycle_end_date(
@@ -641,13 +760,14 @@ def create_menu_cycle(
     try:
 
         cycle_rows = [
-            MenuCycle(
-                chef_id=current_user.id,
-                menu_id=item.menu_id,
-                cycle_day=item.cycle_day,
-                cycle_start_date=cycle_start_date,
-            )
-            for item in payload.items
+          MenuCycle(
+            chef_id=current_user.id,
+            menu_id=item.menu_id,
+            cycle_day=item.cycle_day,
+            cycle_start_date=cycle_start_date,
+            meal_type=item.meal_type,
+          )
+          for item in payload.items
         ]
 
         db.add_all(cycle_rows)
@@ -786,12 +906,13 @@ def get_single_cycle(
 
 
 @router.put(
-    "/cycle/{cycle_start_date}/day/{cycle_day}",
+    "/cycle/{cycle_start_date}/day/{cycle_day}/{meal_type}",
     response_model=MenuCycleItemResponse,
 )
 def update_cycle_day(
     cycle_start_date: date,
     cycle_day: int,
+    meal_type: str,
     payload: MenuCycleItemCreate,
     db: Session = Depends(get_db),
     current_user=Depends(require_role(["chef"])),
@@ -848,11 +969,12 @@ def update_cycle_day(
     # -----------------------------------------------------
 
     cycle = (
-        db.query(MenuCycle)
-        .filter(
-            MenuCycle.chef_id == current_user.id,
-            MenuCycle.cycle_start_date == cycle_start_date,
-            MenuCycle.cycle_day == cycle_day,
+      db.query(MenuCycle)
+      .filter(
+        MenuCycle.chef_id == current_user.id,
+        MenuCycle.cycle_start_date == cycle_start_date,
+        MenuCycle.cycle_day == cycle_day,
+        MenuCycle.meal_type == meal_type,
         )
         .first()
     )
@@ -1048,6 +1170,11 @@ def delete_date_override(
 # =========================================================
 
 
+# =========================================================
+# CUSTOMER
+# GET NEXT 7 DAYS FOR VERIFIED CHEF
+# =========================================================
+
 @router.get(
     "/customer/{chef_id}",
 )
@@ -1056,6 +1183,7 @@ def get_customer_7_day_menu(
     db: Session = Depends(get_db),
 ):
     today = today_india()
+    now = datetime.now(IST)
 
     # -----------------------------------------------------
     # ONLY VERIFIED + ACTIVE CHEF
@@ -1067,7 +1195,7 @@ def get_customer_7_day_menu(
     )
 
     # -----------------------------------------------------
-    # Build next 7 days
+    # BUILD NEXT 7 DAYS
     # -----------------------------------------------------
 
     days = []
@@ -1078,67 +1206,196 @@ def get_customer_7_day_menu(
             today + timedelta(days=offset)
         )
 
-        menu, source = get_menu_for_day(
-            db,
-            chef_id,
-            target_date,
-        )
-
         cycle, cycle_day = resolve_cycle_and_day(
-            db,
-            chef_id,
-            target_date,
+            db=db,
+            chef_id=chef_id,
+            target_date=target_date,
         )
 
+        meals = []
+
         # -------------------------------------------------
-        # ONLY TODAY CAN BE ORDERED
+        # BREAKFAST / LUNCH / DINNER
         # -------------------------------------------------
 
-        can_order = (
-            target_date == today
-            and menu is not None
-            and menu.is_available is True
-            and menu.quantity is not None
-            and menu.quantity > 0
-        )
+        for meal_type in (
+            "breakfast",
+            "lunch",
+            "dinner",
+        ):
+
+            # ---------------------------------------------
+            # GET MENU FOR DATE + MEAL
+            # ---------------------------------------------
+
+            menu, source = get_menu_for_day(
+                db=db,
+                chef_id=chef_id,
+                target_date=target_date,
+                meal_type=meal_type,
+            )
+
+            # ---------------------------------------------
+            # CUTOFF TIME
+            # ---------------------------------------------
+
+            cutoff_at = datetime.combine(
+                target_date,
+                MEAL_CUTOFF_TIMES[meal_type],
+            ).replace(
+                tzinfo=IST
+            )
+
+            # ---------------------------------------------
+            # ORDER AVAILABILITY
+            # ---------------------------------------------
+
+            can_order = (
+                target_date == today
+                and now < cutoff_at
+                and menu is not None
+                and menu.is_available is True
+                and menu.quantity is not None
+                and menu.quantity > 0
+            )
+
+            # ---------------------------------------------
+            # MEAL STATUS
+            # ---------------------------------------------
+
+            if target_date < today:
+
+                meal_status = "past"
+
+            elif target_date > today:
+
+                meal_status = "upcoming"
+
+            elif now >= cutoff_at:
+
+                meal_status = "cutoff_passed"
+
+            elif menu is None:
+
+                meal_status = "unavailable"
+
+            elif menu.is_available is not True:
+
+                meal_status = "out_of_stock"
+
+            elif menu.quantity is None or menu.quantity <= 0:
+
+                meal_status = "out_of_stock"
+
+            else:
+
+                meal_status = "available"
+
+            # ---------------------------------------------
+            # MEAL RESPONSE
+            # ---------------------------------------------
+
+            meals.append(
+                {
+                    "meal_type": meal_type,
+
+                    "cutoff_time": (
+                        MEAL_CUTOFF_TIMES[
+                            meal_type
+                        ].strftime("%I:%M %p")
+                    ),
+
+                    "meal_status": meal_status,
+
+                    "can_order": can_order,
+
+                    "menu": serialize_menu(menu),
+
+                    "source": source,
+                }
+            )
+
+        # -------------------------------------------------
+        # DAY RESPONSE
+        # -------------------------------------------------
 
         days.append(
             {
                 "date": target_date,
+
                 "cycle_day": cycle_day,
-                "is_today": target_date == today,
-                "is_past": target_date < today,
-                "is_upcoming": target_date > today,
-                "can_order": can_order,
-                "source": source,
-                "menu": serialize_menu(menu),
+
+                "is_today": (
+                    target_date == today
+                ),
+
+                "is_past": (
+                    target_date < today
+                ),
+
+                "is_upcoming": (
+                    target_date > today
+                ),
+
+                "meals": meals,
             }
         )
 
+    # -----------------------------------------------------
+    # FINAL RESPONSE
+    # -----------------------------------------------------
+
     return {
         "success": True,
+
         "chef_id": chef_id,
+
         "start_date": today,
-        "end_date": today + timedelta(days=6),
+
+        "end_date": (
+            today + timedelta(days=6)
+        ),
+
         "days": days,
     }
-
-
 # =========================================================
 # CUSTOMER
 # GET MENU DETAILS FOR A SPECIFIC DATE
 # =========================================================
 
 
+# =========================================================
+# CUSTOMER
+# GET MENU DETAILS FOR A SPECIFIC DATE + MEAL
+# =========================================================
+
 @router.get(
-    "/customer/{chef_id}/date/{menu_date}",
+    "/customer/{chef_id}/date/{menu_date}/{meal_type}",
 )
 def get_customer_menu_details(
     chef_id: UUID,
     menu_date: date,
+    meal_type: str,
     db: Session = Depends(get_db),
 ):
     today = today_india()
+
+    # -----------------------------------------------------
+    # NORMALIZE MEAL TYPE
+    # -----------------------------------------------------
+
+    meal_type = meal_type.lower().strip()
+
+    if meal_type not in VALID_MEALS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid meal type. "
+                "Use breakfast, lunch or dinner."
+            ),
+        )
+
+    now = datetime.now(IST)
 
     # -----------------------------------------------------
     # ONLY VERIFIED + ACTIVE CHEF
@@ -1150,31 +1407,45 @@ def get_customer_menu_details(
     )
 
     # -----------------------------------------------------
-    # Do not allow arbitrary historical dates through
-    # the active-menu endpoint.
+    # PAST DATE NOT ALLOWED
     # -----------------------------------------------------
 
     if menu_date < today:
         raise HTTPException(
             status_code=400,
-            detail="Past menu dates are not available for ordering",
+            detail=(
+                "Past menu dates are not available "
+                "for ordering"
+            ),
         )
 
     # -----------------------------------------------------
-    # Limit customer active menu details to 7-day window
+    # ONLY NEXT 7 DAYS
     # -----------------------------------------------------
 
     if menu_date > today + timedelta(days=6):
         raise HTTPException(
             status_code=400,
-            detail="Menu date must be within the next 7 days",
+            detail=(
+                "Menu date must be within "
+                "the next 7 days"
+            ),
         )
 
+    # -----------------------------------------------------
+    # GET MENU
+    # -----------------------------------------------------
+
     menu, source = get_menu_for_day(
-        db,
-        chef_id,
-        menu_date,
+        db=db,
+        chef_id=chef_id,
+        target_date=menu_date,
+        meal_type=meal_type,
     )
+
+    # -----------------------------------------------------
+    # NO MENU
+    # -----------------------------------------------------
 
     if not menu:
         raise HTTPException(
@@ -1182,27 +1453,101 @@ def get_customer_menu_details(
             detail="No menu is scheduled for this date",
         )
 
+    # -----------------------------------------------------
+    # RESOLVE CYCLE
+    # -----------------------------------------------------
+
     cycle, cycle_day = resolve_cycle_and_day(
-        db,
-        chef_id,
-        menu_date,
+        db=db,
+        chef_id=chef_id,
+        target_date=menu_date,
     )
+
+    # -----------------------------------------------------
+    # CUTOFF TIME
+    # -----------------------------------------------------
+
+    cutoff_at = datetime.combine(
+        menu_date,
+        MEAL_CUTOFF_TIMES[meal_type],
+    ).replace(
+        tzinfo=IST
+    )
+
+    # -----------------------------------------------------
+    # ORDER AVAILABILITY
+    # -----------------------------------------------------
 
     can_order = (
         menu_date == today
+        and now < cutoff_at
         and menu.is_available is True
         and menu.quantity is not None
         and menu.quantity > 0
     )
 
+    # -----------------------------------------------------
+    # MEAL STATUS
+    # -----------------------------------------------------
+
+    if menu_date < today:
+
+        meal_status = "past"
+
+    elif menu_date > today:
+
+        meal_status = "upcoming"
+
+    elif now >= cutoff_at:
+
+        meal_status = "cutoff_passed"
+
+    elif menu.is_available is not True:
+
+        meal_status = "out_of_stock"
+
+    elif menu.quantity is None or menu.quantity <= 0:
+
+        meal_status = "out_of_stock"
+
+    else:
+
+        meal_status = "available"
+
+    # -----------------------------------------------------
+    # RESPONSE
+    # -----------------------------------------------------
+
     return {
         "success": True,
+
         "chef_id": chef_id,
+
         "date": menu_date,
+
         "cycle_day": cycle_day,
-        "is_today": menu_date == today,
-        "is_upcoming": menu_date > today,
+
+        "meal_type": meal_type,
+
+        "cutoff_time": (
+            MEAL_CUTOFF_TIMES[
+                meal_type
+            ].strftime("%I:%M %p")
+        ),
+
+        "meal_status": meal_status,
+
+        "is_today": (
+            menu_date == today
+        ),
+
+        "is_upcoming": (
+            menu_date > today
+        ),
+
         "can_order": can_order,
+
         "source": source,
+
         "menu": serialize_menu(menu),
     }
