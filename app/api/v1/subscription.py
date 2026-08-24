@@ -1378,6 +1378,92 @@ def get_subscription_meals(
             status_code=500,
             detail="Unable to load subscription menu",
         )
+        
+@router.get("/{subscription_id}/menu-cycle")
+def get_customer_subscription_menu_cycle(
+    subscription_id: UUID,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    subscription = (
+        db.query(Subscription)
+        .filter(
+            Subscription.id == subscription_id,
+            Subscription.user_id == user.id,
+        )
+        .first()
+    )
+
+    if not subscription:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
+
+    schedules = (
+        db.query(SubscriptionMealSchedule)
+        .filter(
+            SubscriptionMealSchedule.subscription_id == subscription.id
+        )
+        .order_by(
+            SubscriptionMealSchedule.date.asc(),
+            SubscriptionMealSchedule.meal_type.asc(),
+        )
+        .all()
+    )
+
+    result = []
+
+    for schedule in schedules:
+
+        menu = None
+
+        if schedule.menu_id:
+            menu = (
+                db.query(Menu)
+                .filter(
+                    Menu.id == schedule.menu_id,
+                    Menu.chef_id == subscription.chef_id,
+                )
+                .first()
+            )
+
+        day_number = (
+            schedule.date - subscription.start_date.date()
+        ).days + 1
+
+        result.append({
+            "id": str(schedule.id),
+            "day_number": day_number,
+            "meal_type": schedule.meal_type,
+            "menu_id": (
+                str(schedule.menu_id)
+                if schedule.menu_id
+                else None
+            ),
+            "menu_name": (
+                menu.name
+                if menu
+                else None
+            ),
+            "menu_description": (
+                menu.description
+                if menu
+                else None
+            ),
+            "menu_price": (
+                menu.price
+                if menu
+                else None
+            ),
+            "menu_image": (
+                menu.image_urls[0]
+                if menu and menu.image_urls
+                else None
+            ),
+        })
+
+    return result
 
 # =========================================================
 # TURN MEAL OFF
