@@ -1,5 +1,4 @@
 from typing import List
-from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -7,6 +6,7 @@ from fastapi import (
     HTTPException,
     status,
 )
+
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -30,11 +30,19 @@ from app.schemas.subscription_plan_menu_cycle import (
 )
 
 
+# =========================================================
+# ROUTER
+# =========================================================
+
 router = APIRouter(
     prefix="/subscriptions/chef/plans",
     tags=["Subscription Plan Menu Cycle"],
 )
 
+
+# =========================================================
+# CONSTANTS
+# =========================================================
 
 VALID_MEAL_TYPES = {
     "breakfast",
@@ -42,15 +50,16 @@ VALID_MEAL_TYPES = {
     "dinner",
 }
 
-
 REQUIRED_DAYS = 30
 
 REQUIRED_MEALS_PER_DAY = 3
 
 REQUIRED_TOTAL_MAPPINGS = (
-    REQUIRED_DAYS *
-    REQUIRED_MEALS_PER_DAY
+    REQUIRED_DAYS * REQUIRED_MEALS_PER_DAY
 )
+
+# Final:
+# 30 days × 3 meals = 90 mappings
 
 
 # =========================================================
@@ -82,7 +91,7 @@ def get_chef_plan_or_404(
 
 
 # =========================================================
-# GET CURRENT 30-DAY MENU MAPPING
+# GET CURRENT 30-DAY MENU CYCLE
 # =========================================================
 
 @router.get(
@@ -98,7 +107,7 @@ def get_subscription_plan_menu_cycle(
 ):
 
     # -----------------------------------------------------
-    # VERIFY PLAN OWNERSHIP
+    # VERIFY PLAN BELONGS TO CURRENT CHEF
     # -----------------------------------------------------
 
     get_chef_plan_or_404(
@@ -108,7 +117,7 @@ def get_subscription_plan_menu_cycle(
     )
 
     # -----------------------------------------------------
-    # GET MAPPINGS
+    # GET SAVED MAPPINGS
     # -----------------------------------------------------
 
     mappings = (
@@ -130,7 +139,7 @@ def get_subscription_plan_menu_cycle(
 
 
 # =========================================================
-# SAVE / REPLACE COMPLETE 30-DAY MENU MAPPING
+# SAVE / REPLACE COMPLETE 30-DAY MENU CYCLE
 # =========================================================
 
 @router.put(
@@ -168,6 +177,16 @@ def save_subscription_plan_menu_cycle(
             ),
         )
 
+    # -----------------------------------------------------
+    # EXACTLY 90 MAPPINGS
+    #
+    # 30 Breakfast
+    # 30 Lunch
+    # 30 Dinner
+    #
+    # Total = 90
+    # -----------------------------------------------------
+
     if len(payload.items) != REQUIRED_TOTAL_MAPPINGS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -188,7 +207,7 @@ def save_subscription_plan_menu_cycle(
     for item in payload.items:
 
         # -------------------------------------------------
-        # DAY
+        # DAY NUMBER
         # -------------------------------------------------
 
         if (
@@ -208,10 +227,7 @@ def save_subscription_plan_menu_cycle(
         # MEAL TYPE
         # -------------------------------------------------
 
-        if (
-            item.meal_type
-            not in VALID_MEAL_TYPES
-        ):
+        if item.meal_type not in VALID_MEAL_TYPES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
@@ -223,7 +239,9 @@ def save_subscription_plan_menu_cycle(
             )
 
         # -------------------------------------------------
-        # DUPLICATE
+        # DUPLICATE CHECK
+        #
+        # Same day + same meal cannot appear twice.
         # -------------------------------------------------
 
         key = (
@@ -245,6 +263,16 @@ def save_subscription_plan_menu_cycle(
 
     # =====================================================
     # 4. VERIFY EXACT 30 × 3 COMBINATION
+    #
+    # EVERY DAY MUST HAVE:
+    #
+    #   Breakfast
+    #   Lunch
+    #   Dinner
+    #
+    # This guarantees exactly:
+    #
+    #   30 × 3 = 90
     # =====================================================
 
     expected_keys = {
@@ -253,22 +281,25 @@ def save_subscription_plan_menu_cycle(
             meal_type,
         )
         for day_number in range(1, 31)
-        for meal_type in VALID_MEAL_TYPES
+        for meal_type in (
+            "breakfast",
+            "lunch",
+            "dinner",
+        )
     }
 
     received_keys = seen
 
-    missing_keys = (
-        expected_keys -
-        received_keys
-    )
+    # -----------------------------------------------------
+    # FIND MISSING MAPPINGS
+    # -----------------------------------------------------
 
-    extra_keys = (
-        received_keys -
-        expected_keys
+    missing_keys = (
+        expected_keys - received_keys
     )
 
     if missing_keys:
+
         formatted_missing = ", ".join(
             f"Day {day} {meal}"
             for day, meal in sorted(
@@ -284,15 +315,28 @@ def save_subscription_plan_menu_cycle(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 "Incomplete subscription menu cycle. "
+                "Breakfast, lunch and dinner are required "
+                "for all 30 days. "
                 f"Missing: {formatted_missing}"
             ),
         )
 
+    # -----------------------------------------------------
+    # FIND EXTRA / INVALID MAPPINGS
+    # -----------------------------------------------------
+
+    extra_keys = (
+        received_keys - expected_keys
+    )
+
     if extra_keys:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Invalid subscription menu cycle."
+                "Invalid subscription menu cycle. "
+                "Only breakfast, lunch and dinner are "
+                "allowed for days 1-30."
             ),
         )
 
@@ -327,11 +371,11 @@ def save_subscription_plan_menu_cycle(
     }
 
     invalid_menu_ids = (
-        menu_ids -
-        valid_menu_ids
+        menu_ids - valid_menu_ids
     )
 
     if invalid_menu_ids:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -342,13 +386,15 @@ def save_subscription_plan_menu_cycle(
         )
 
     # =====================================================
-    # 6. TRANSACTION
+    # 6. SAVE TRANSACTION
     # =====================================================
 
     try:
 
         # -------------------------------------------------
-        # DELETE OLD MAPPING
+        # DELETE OLD CYCLE
+        #
+        # Save = complete replacement
         # -------------------------------------------------
 
         (
@@ -372,20 +418,16 @@ def save_subscription_plan_menu_cycle(
 
         for item in payload.items:
 
-            mapping = (
-                SubscriptionPlanMenuCycle(
-                    plan_id=plan_id,
-                    day_number=item.day_number,
-                    meal_type=item.meal_type,
-                    menu_id=item.menu_id,
-                )
+            mapping = SubscriptionPlanMenuCycle(
+                plan_id=plan_id,
+                day_number=item.day_number,
+                meal_type=item.meal_type,
+                menu_id=item.menu_id,
             )
 
             db.add(mapping)
 
-            new_mappings.append(
-                mapping
-            )
+            new_mappings.append(mapping)
 
         # -------------------------------------------------
         # COMMIT
@@ -401,7 +443,7 @@ def save_subscription_plan_menu_cycle(
             db.refresh(mapping)
 
         # -------------------------------------------------
-        # RETURN SORTED RESULT
+        # SORT RESPONSE
         # -------------------------------------------------
 
         new_mappings.sort(
@@ -412,6 +454,10 @@ def save_subscription_plan_menu_cycle(
         )
 
         return new_mappings
+
+    # =====================================================
+    # ERROR HANDLING
+    # =====================================================
 
     except HTTPException:
         db.rollback()
