@@ -7,6 +7,7 @@ from uuid import UUID
 import uuid
 from app.models.notification import Notification
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
+from app.models.subscription_plan_menu_cycle import SubscriptionPlanMenuCycle
 from app.services.wallet import credit_wallet, debit_wallet
 from app.services.whatsapp import (
     send_subscription_meal_whatsapp,
@@ -27,6 +28,13 @@ import base64
 import hmac
 import hashlib
 import requests
+
+from app.models.menu import Menu
+from app.schemas.subscription_plan_menu_cycle import (
+    SubscriptionPlanMenuCycleBulkSave,
+)
+from pydantic import BaseModel
+from typing import Optional
 router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
 
 # =========================================================
@@ -43,7 +51,9 @@ ALL_DELIVERY_DAYS = [
     "Sun",
 ]
 
-from pydantic import BaseModel
+# from pydantic import BaseModel
+
+
 
 
 class BreakfastPaymentCreate(BaseModel):
@@ -63,19 +73,15 @@ def create_meal_schedules(
     plan: SubscriptionPlan,
 ):
     """
-    Create meal schedules for every delivery date
-    of the subscription.
+    Create meal schedules using the subscription plan's
+    30-day menu cycle.
 
-    Menu is resolved date-wise using:
-    1. Date Override
-    2. 30-day Menu Cycle
-
-    Each meal schedule stores the exact menu_id
-    for that delivery date.
+    Existing Menu records are reused.
+    No new Menu is created.
     """
 
     # =====================================================
-    # 1. MEALS
+    # MEALS
     # =====================================================
 
     meals = {
@@ -83,12 +89,12 @@ def create_meal_schedules(
         "dinner",
     }
 
-    # Breakfast only if customer has selected it
+    # Breakfast only if enabled
     if subscription.breakfast_enabled:
         meals.add("breakfast")
 
     # =====================================================
-    # 2. CUSTOMER DELIVERY DAYS
+    # DELIVERY DAYS
     # =====================================================
 
     delivery_days = {
@@ -97,14 +103,14 @@ def create_meal_schedules(
     }
 
     # =====================================================
-    # 3. SUBSCRIPTION DATE RANGE
+    # DATE RANGE
     # =====================================================
 
     current_date = subscription.start_date.date()
     end_date = subscription.end_date.date()
 
     # =====================================================
-    # 4. CREATE DAILY SCHEDULE
+    # LOOP DATES
     # =====================================================
 
     while current_date <= end_date:
@@ -115,34 +121,85 @@ def create_meal_schedules(
         if weekday in delivery_days:
 
             # =================================================
-            # FIND MENU FOR THIS EXACT DATE
+            # CALCULATE SUBSCRIPTION DAY
             # =================================================
 
-            menu, source = get_menu_for_day(
-                db=db,
-                chef_id=subscription.chef_id,
-                target_date=current_date,
-                # meal_type=meal_type,
-            )
+            day_number = (
+                current_date
+                - subscription.start_date.date()
+            ).days + 1
 
-            # =================================================
-            # MENU MUST EXIST
-            # =================================================
-
-            if not menu:
+            if day_number < 1 or day_number > 30:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"No menu configured for "
-                        f"{current_date.strftime('%d-%m-%Y')}"
+                        f"Invalid subscription cycle day: "
+                        f"{day_number}"
                     ),
                 )
+
+            # =================================================
+            # GET CYCLE MAPPINGS
+            # =================================================
+
+            cycle_rows = (
+                db.query(SubscriptionPlanMenuCycle)
+                .filter(
+                    SubscriptionPlanMenuCycle.plan_id == plan.id,
+                    SubscriptionPlanMenuCycle.day_number == day_number,
+                    SubscriptionPlanMenuCycle.meal_type.in_(meals),
+                )
+                .all()
+            )
+
+            cycle_map = {
+                row.meal_type: row
+                for row in cycle_rows
+            }
 
             # =================================================
             # CREATE EACH MEAL
             # =================================================
 
             for meal_type in meals:
+
+                cycle_row = cycle_map.get(meal_type)
+
+                if not cycle_row:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"No {meal_type} menu configured "
+                            f"for subscription Day {day_number}"
+                        ),
+                    )
+
+                # =============================================
+                # VERIFY MENU
+                # =============================================
+
+                menu = (
+                    db.query(Menu)
+                    .filter(
+                        Menu.id == cycle_row.menu_id,
+                        Menu.chef_id == subscription.chef_id,
+                    )
+                    .first()
+                )
+
+                if not menu:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Menu not found for "
+                            f"Day {day_number} "
+                            f"{meal_type}"
+                        ),
+                    )
+
+                # =============================================
+                # CUTOFF
+                # =============================================
 
                 cutoff_time = MEAL_CUTOFF_TIMES[meal_type]
 
@@ -153,7 +210,7 @@ def create_meal_schedules(
                 )
 
                 # =============================================
-                # MEAL PRICE
+                # PRICE
                 # =============================================
 
                 if meal_type == "breakfast":
@@ -174,10 +231,7 @@ def create_meal_schedules(
 
                 schedule = SubscriptionMealSchedule(
                     subscription_id=subscription.id,
-
-                    # 🔥 EXACT MENU FOR THIS DATE
                     menu_id=menu.id,
-
                     date=current_date,
                     meal_type=meal_type,
                     meal_price=meal_price,
@@ -2392,3 +2446,173 @@ def verify_breakfast_payment(
             status_code=500,
             detail="Breakfast payment verification failed",
         )
+        
+        
+# =========================================================
+# GET SUBSCRIPTION PLAN MENU CYCLE
+# =========================================================
+
+# =========================================================
+# GET SUBSCRIPTION PLAN MENU CYCLE
+# =========================================================
+
+@router.get("/chef/plans/{plan_id}/menu-cycle")
+def get_subscription_plan_menu_cycle(
+    plan_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # -----------------------------------------------------
+    # FIND PLAN
+    # -----------------------------------------------------
+
+    plan = (
+        db.query(SubscriptionPlan)
+        .filter(
+            SubscriptionPlan.id == plan_id,
+            SubscriptionPlan.chef_id == user.id,
+        )
+        .first()
+    )
+
+    if not plan:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription plan not found",
+        )
+
+    # -----------------------------------------------------
+    # GET EXISTING CYCLE
+    # -----------------------------------------------------
+
+    cycle = (
+        db.query(SubscriptionPlanMenuCycle)
+        .filter(
+            SubscriptionPlanMenuCycle.plan_id == plan.id
+        )
+        .order_by(
+            SubscriptionPlanMenuCycle.day_number.asc(),
+            SubscriptionPlanMenuCycle.meal_type.asc(),
+        )
+        .all()
+    )
+
+    # -----------------------------------------------------
+    # RETURN 30 DAYS
+    # -----------------------------------------------------
+
+    return {
+        "success": True,
+        "plan_id": str(plan.id),
+        "days": [
+            {
+                "id": str(row.id),
+                "day_number": row.day_number,
+                "meal_type": row.meal_type,
+                "menu_id": str(row.menu_id),
+            }
+            for row in cycle
+        ],
+    }
+
+
+# =========================================================
+# SAVE / UPDATE SUBSCRIPTION PLAN MENU CYCLE
+# =========================================================
+
+# =========================================================
+# SAVE / UPDATE SUBSCRIPTION PLAN MENU CYCLE
+# =========================================================
+
+@router.put("/chef/plans/{plan_id}/menu-cycle")
+def save_subscription_plan_menu_cycle(
+    plan_id: str,
+    data: SubscriptionPlanMenuCycleBulkSave,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # -----------------------------------------------------
+    # FIND PLAN
+    # -----------------------------------------------------
+
+    plan = (
+        db.query(SubscriptionPlan)
+        .filter(
+            SubscriptionPlan.id == plan_id,
+            SubscriptionPlan.chef_id == user.id,
+        )
+        .first()
+    )
+
+    if not plan:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription plan not found",
+        )
+
+    # -----------------------------------------------------
+    # BASIC VALIDATION
+    # -----------------------------------------------------
+
+    if not data.items:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one menu mapping is required",
+        )
+
+    # -----------------------------------------------------
+    # DELETE OLD MAPPING
+    # -----------------------------------------------------
+
+    db.query(SubscriptionPlanMenuCycle).filter(
+        SubscriptionPlanMenuCycle.plan_id == plan.id
+    ).delete(
+        synchronize_session=False
+    )
+
+    # -----------------------------------------------------
+    # SAVE NEW MAPPING
+    # -----------------------------------------------------
+
+    for item in data.items:
+
+        # Verify menu belongs to this chef
+        menu = (
+            db.query(Menu)
+            .filter(
+                Menu.id == item.menu_id,
+                Menu.chef_id == user.id,
+            )
+            .first()
+        )
+
+        if not menu:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Menu {item.menu_id} does not "
+                    f"belong to this chef"
+                ),
+            )
+
+        cycle = SubscriptionPlanMenuCycle(
+            plan_id=plan.id,
+            day_number=item.day_number,
+            meal_type=item.meal_type,
+            menu_id=item.menu_id,
+        )
+
+        db.add(cycle)
+
+    # -----------------------------------------------------
+    # COMMIT
+    # -----------------------------------------------------
+
+    db.commit()
+
+    return {
+        "success": True,
+        "message": "Subscription menu cycle saved successfully",
+        "plan_id": str(plan.id),
+        "total_mappings": len(data.items),
+    }
