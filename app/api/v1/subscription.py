@@ -122,6 +122,7 @@ def create_meal_schedules(
                 db=db,
                 chef_id=subscription.chef_id,
                 target_date=current_date,
+                # meal_type=meal_type,
             )
 
             # =================================================
@@ -1019,6 +1020,310 @@ def get_today_meals(
         })
 
     return result
+
+
+# =========================================================
+# GET SUBSCRIPTION MENU
+#
+# DEFAULT:
+#   First 7 subscription days
+#
+# VIEW ALL:
+#   Complete subscription menu
+#
+# IMPORTANT:
+#   Existing Menu records are reused.
+#   No new Menu is created here.
+# =========================================================
+
+@router.get("/{subscription_id}/meals")
+def get_subscription_meals(
+    subscription_id: UUID,
+    view_all: bool = Query(
+        False,
+        description="False = first 7 days, True = complete subscription menu",
+    ),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    try:
+        # =====================================================
+        # 1. FIND SUBSCRIPTION
+        # =====================================================
+
+        subscription = (
+            db.query(Subscription)
+            .filter(
+                Subscription.id == subscription_id,
+                Subscription.user_id == user.id,
+            )
+            .first()
+        )
+
+        if not subscription:
+            raise HTTPException(
+                status_code=404,
+                detail="Subscription not found",
+            )
+
+        # =====================================================
+        # 2. VALIDATE SUBSCRIPTION DATES
+        # =====================================================
+
+        if not subscription.start_date or not subscription.end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Subscription dates are not configured",
+            )
+
+        if subscription.end_date < subscription.start_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid subscription date range",
+            )
+
+        # =====================================================
+        # 3. GET SCHEDULES
+        #
+        # IMPORTANT:
+        # We read from SubscriptionMealSchedule.
+        #
+        # This means:
+        # Subscription
+        #      ↓
+        # SubscriptionMealSchedule
+        #      ↓
+        # Existing Menu
+        # =====================================================
+
+        schedules_query = (
+            db.query(SubscriptionMealSchedule)
+            .filter(
+                SubscriptionMealSchedule.subscription_id
+                == subscription.id,
+            )
+            .order_by(
+                SubscriptionMealSchedule.date.asc(),
+                SubscriptionMealSchedule.meal_type.asc(),
+            )
+        )
+
+        schedules = schedules_query.all()
+
+        # =====================================================
+        # 4. NO SCHEDULES
+        # =====================================================
+
+        if not schedules:
+            return {
+                "success": True,
+                "subscription_id": str(subscription.id),
+                "view_all": view_all,
+                "total_days": 0,
+                "days": [],
+            }
+
+        # =====================================================
+        # 5. GROUP MEALS BY DATE
+        # =====================================================
+
+        grouped_days = {}
+
+        for schedule in schedules:
+
+            schedule_date = schedule.date
+
+            if schedule_date not in grouped_days:
+                grouped_days[schedule_date] = []
+
+            # =================================================
+            # GET EXACT EXISTING MENU
+            # =================================================
+
+            menu = None
+
+            if schedule.menu_id:
+
+                menu = (
+                    db.query(Menu)
+                    .filter(
+                        Menu.id == schedule.menu_id,
+                        Menu.chef_id == subscription.chef_id,
+                    )
+                    .first()
+                )
+
+            # =================================================
+            # MENU NOT FOUND
+            #
+            # Do NOT crash entire subscription menu.
+            # Return meal with menu=None.
+            # =================================================
+
+            menu_data = None
+
+            if menu:
+
+                menu_data = {
+                    "id": str(menu.id),
+                    "name": menu.name,
+                    "description": menu.description,
+                    "price": menu.price,
+                    "category": menu.category,
+                    "food_type": menu.food_type,
+
+                    "calories": menu.calories,
+                    "protein": menu.protein,
+                    "carbs": menu.carbs,
+                    "fats": menu.fats,
+
+                    "ingredients": menu.ingredients or [],
+                    "image_urls": menu.image_urls or [],
+
+                    "menu_image": (
+                        menu.image_urls[0]
+                        if menu.image_urls
+                        else None
+                    ),
+                }
+
+            # =================================================
+            # ADD MEAL
+            # =================================================
+
+            grouped_days[schedule_date].append(
+                {
+                    "schedule_id": str(schedule.id),
+
+                    "subscription_id": str(
+                        schedule.subscription_id
+                    ),
+
+                    "date": schedule.date,
+
+                    "meal_type": schedule.meal_type,
+
+                    "status": schedule.status,
+
+                    "meal_price": schedule.meal_price,
+
+                    "cutoff_at": schedule.cutoff_at,
+
+                    "menu_id": (
+                        str(schedule.menu_id)
+                        if schedule.menu_id
+                        else None
+                    ),
+
+                    "menu": menu_data,
+                }
+            )
+
+        # =====================================================
+        # 6. SORT DATES
+        # =====================================================
+
+        sorted_dates = sorted(grouped_days.keys())
+
+        # =====================================================
+        # 7. 7 DAYS / VIEW ALL
+        #
+        # False:
+        #   First 7 subscription delivery dates
+        #
+        # True:
+        #   Complete subscription schedule
+        # =====================================================
+
+        if not view_all:
+            sorted_dates = sorted_dates[:7]
+
+        # =====================================================
+        # 8. BUILD FINAL RESPONSE
+        # =====================================================
+
+        result_days = []
+
+        meal_order = {
+            "breakfast": 1,
+            "lunch": 2,
+            "dinner": 3,
+        }
+
+        for current_date in sorted_dates:
+
+            meals = grouped_days[current_date]
+
+            # -----------------------------------------------
+            # Sort Breakfast → Lunch → Dinner
+            # -----------------------------------------------
+
+            meals.sort(
+                key=lambda meal: meal_order.get(
+                    meal["meal_type"],
+                    99,
+                )
+            )
+
+            result_days.append(
+                {
+                    "date": current_date,
+                    "day": current_date.strftime("%A"),
+                    "meals": meals,
+                }
+            )
+
+        # =====================================================
+        # 9. FINAL RESPONSE
+        # =====================================================
+
+        return {
+            "success": True,
+
+            "subscription_id": str(
+                subscription.id
+            ),
+
+            "start_date": subscription.start_date,
+
+            "end_date": subscription.end_date,
+
+            "breakfast_enabled": bool(
+                subscription.breakfast_enabled
+            ),
+
+            "view_all": view_all,
+
+            "total_days": len(result_days),
+
+            "days": result_days,
+        }
+
+    # =========================================================
+    # FASTAPI HTTP ERRORS
+    # =========================================================
+
+    except HTTPException:
+        raise
+
+    # =========================================================
+    # DATABASE / SQL ERRORS
+    # =========================================================
+
+    except Exception as e:
+
+        logger.exception(
+            "Failed to load subscription meals. "
+            "subscription_id=%s user_id=%s error=%s",
+            subscription_id,
+            getattr(user, "id", None),
+            str(e),
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to load subscription menu",
+        )
 
 # =========================================================
 # TURN MEAL OFF

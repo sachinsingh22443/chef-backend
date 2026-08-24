@@ -11,9 +11,15 @@ from app.db.base import Base
 from app.api.v1.wallet import router as wallet_router
 # Models
 from app.models.refresh_token import RefreshToken
-from app.models import user, menu, order, order_item, subscription_plan
+from app.models import (
+    user,
+    menu,
+    order,
+    order_item,
+    subscription_plan,
+    subscription_plan_menu_cycle,
+)
 
-# Routers
 from app.api.v1 import (
     auth,
     users,
@@ -24,6 +30,7 @@ from app.api.v1 import (
     tomorrow_special,
     notification,
     subscription,
+    subscription_plan_menu_cycle,
     orders,
     cart,
     address,
@@ -87,6 +94,9 @@ app.include_router(address.router)
 app.include_router(cart.router)
 app.include_router(orders.router)
 app.include_router(subscription.router)
+app.include_router(
+    subscription_plan_menu_cycle.router
+)
 app.include_router(notification.router)
 app.include_router(tomorrow_special.router)
 app.include_router(dashboard.router)

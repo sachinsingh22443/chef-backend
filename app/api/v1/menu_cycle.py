@@ -1180,7 +1180,7 @@ def delete_menu_cycle(
 
         return {
             "success": True,
-            "message": (
+            "mesdefsage": (
                 "Future menu cycle deleted successfully"
             ),
             "cycle_start_date": cycle_start_date,

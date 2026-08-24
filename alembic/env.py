@@ -33,6 +33,7 @@ from app.models import (
     subscription,
     subscription_plan,
     subscription_meal_schedule,
+    subscription_plan_menu_cycle,
     wallet,
     wallet_transaction,
     menu_cycle,
