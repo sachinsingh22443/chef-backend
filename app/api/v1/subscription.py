@@ -1385,11 +1385,16 @@ def get_customer_subscription_menu_cycle(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # =====================================================
+    # 1. FIND CUSTOMER SUBSCRIPTION
+    # =====================================================
+
     subscription = (
         db.query(Subscription)
         .filter(
             Subscription.id == subscription_id,
             Subscription.user_id == user.id,
+            Subscription.status == "active",
         )
         .first()
     )
@@ -1397,68 +1402,111 @@ def get_customer_subscription_menu_cycle(
     if not subscription:
         raise HTTPException(
             status_code=404,
-            detail="Subscription not found",
+            detail="Active subscription not found",
         )
 
-    schedules = (
-        db.query(SubscriptionMealSchedule)
+    # =====================================================
+    # 2. FIND SUBSCRIPTION PLAN
+    # =====================================================
+
+    plan = (
+        db.query(SubscriptionPlan)
         .filter(
-            SubscriptionMealSchedule.subscription_id == subscription.id
+            SubscriptionPlan.id == subscription.plan_id,
+        )
+        .first()
+    )
+
+    if not plan:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription plan not found",
+        )
+
+    # =====================================================
+    # 3. GET CHEF'S SAVED 30-DAY MENU MAPPING
+    # =====================================================
+
+    cycle_rows = (
+        db.query(SubscriptionPlanMenuCycle)
+        .filter(
+            SubscriptionPlanMenuCycle.plan_id == plan.id,
         )
         .order_by(
-            SubscriptionMealSchedule.date.asc(),
-            SubscriptionMealSchedule.meal_type.asc(),
+            SubscriptionPlanMenuCycle.day_number.asc(),
+            SubscriptionPlanMenuCycle.meal_type.asc(),
         )
         .all()
     )
 
+    # =====================================================
+    # 4. RETURN EXACT MENU FOR EACH DAY
+    # =====================================================
+
     result = []
 
-    for schedule in schedules:
+    meal_order = {
+        "breakfast": 1,
+        "lunch": 2,
+        "dinner": 3,
+    }
 
-        menu = None
+    cycle_rows.sort(
+        key=lambda row: (
+            row.day_number,
+            meal_order.get(
+                row.meal_type,
+                99
+            ),
+        )
+    )
 
-        if schedule.menu_id:
-            menu = (
-                db.query(Menu)
-                .filter(
-                    Menu.id == schedule.menu_id,
-                    Menu.chef_id == subscription.chef_id,
-                )
-                .first()
+    for row in cycle_rows:
+
+        menu = (
+            db.query(Menu)
+            .filter(
+                Menu.id == row.menu_id,
+                Menu.chef_id == subscription.chef_id,
             )
-
-        day_number = (
-            schedule.date - subscription.start_date.date()
-        ).days + 1
+            .first()
+        )
 
         result.append({
-            "id": str(schedule.id),
-            "day_number": day_number,
-            "meal_type": schedule.meal_type,
+            "id": str(row.id),
+
+            "day_number": row.day_number,
+
+            "meal_type": row.meal_type,
+
             "menu_id": (
-                str(schedule.menu_id)
-                if schedule.menu_id
+                str(row.menu_id)
+                if row.menu_id
                 else None
             ),
+
             "menu_name": (
                 menu.name
                 if menu
                 else None
             ),
+
             "menu_description": (
                 menu.description
                 if menu
                 else None
             ),
+
             "menu_price": (
                 menu.price
                 if menu
                 else None
             ),
+
             "menu_image": (
                 menu.image_urls[0]
-                if menu and menu.image_urls
+                if menu
+                and menu.image_urls
                 else None
             ),
         })
