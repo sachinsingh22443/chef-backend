@@ -784,20 +784,135 @@ async def create_order(
                     )
 
                 # =============================================
-                # 📅 MENU CYCLE VALIDATION
-                #
-                # Normal customer order:
-                # only today's scheduled menu can be ordered.
-                #
-                # Subscription:
-                # existing subscription flow remains untouched.
+                # 📅 NORMAL CUSTOMER ORDER
                 # =============================================
 
                 if not data.is_subscription:
 
-                    today = datetime.now(
-                        ZoneInfo("Asia/Kolkata")
-                    ).date()
+                    india_now = datetime.now(INDIA_TZ)
+                    today = india_now.date()
+
+                    # -----------------------------------------
+                    # MEAL TYPE
+                    # -----------------------------------------
+
+                    meal_type = getattr(
+                        item,
+                        "meal_type",
+                        None
+                    )
+
+                    if not meal_type:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "Meal type is required. "
+                                "Use breakfast, lunch or dinner."
+                            )
+                        )
+
+                    meal_type = str(
+                        meal_type
+                    ).lower().strip()
+
+                    # -----------------------------------------
+                    # VALID MEAL TYPE
+                    # -----------------------------------------
+
+                    cutoff_times = {
+                        "breakfast": "09:00",
+                        "lunch": "13:00",
+                        "dinner": "20:00",
+                    }
+
+                    if meal_type not in cutoff_times:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "Invalid meal type. "
+                                "Use breakfast, lunch or dinner."
+                            )
+                        )
+
+                    # -----------------------------------------
+                    # UPCOMING / TODAY / PAST
+                    # -----------------------------------------
+
+                    requested_menu_date = getattr(
+                        item,
+                        "menu_date",
+                        None
+                    )
+
+                    # If frontend does not send menu_date,
+                    # normal order defaults to TODAY.
+                    if requested_menu_date:
+                        if isinstance(
+                            requested_menu_date,
+                            datetime
+                        ):
+                            target_date = (
+                                requested_menu_date.date()
+                            )
+
+                        elif isinstance(
+                            requested_menu_date,
+                            date
+                        ):
+                            target_date = (
+                                requested_menu_date
+                            )
+
+                        else:
+                            try:
+                                target_date = datetime.fromisoformat(
+                                    str(requested_menu_date)
+                                    .replace("Z", "+00:00")
+                                ).date()
+
+                            except Exception:
+                                try:
+                                    target_date = date.fromisoformat(
+                                        str(requested_menu_date)
+                                    )
+
+                                except Exception:
+                                    raise HTTPException(
+                                        status_code=400,
+                                        detail="Invalid menu date"
+                                    )
+                    else:
+                        target_date = today
+
+                    # -----------------------------------------
+                    # 🚫 UPCOMING DATE
+                    # -----------------------------------------
+
+                    if target_date > today:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "This meal is upcoming. "
+                                "You can view it, but ordering "
+                                "is not available yet."
+                            )
+                        )
+
+                    # -----------------------------------------
+                    # 🚫 PAST DATE
+                    # -----------------------------------------
+
+                    if target_date < today:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "Past menu dates are closed."
+                            )
+                        )
+
+                    # -----------------------------------------
+                    # MENU CYCLE VALIDATION
+                    # -----------------------------------------
 
                     scheduled_menu_id = get_today_menu_for_chef(
                         db=db,
@@ -810,7 +925,8 @@ async def create_order(
                         raise HTTPException(
                             status_code=400,
                             detail=(
-                                "No menu is scheduled for this chef today"
+                                "No menu is scheduled for "
+                                "this chef today"
                             )
                         )
 
@@ -818,8 +934,38 @@ async def create_order(
                         raise HTTPException(
                             status_code=400,
                             detail=(
-                                "This menu is not available for ordering today. "
+                                "This menu is not available "
+                                "for ordering today. "
                                 "Please select today's menu."
+                            )
+                        )
+
+                    # -----------------------------------------
+                    # ⏰ MEAL CUTOFF
+                    # -----------------------------------------
+
+                    cutoff_datetime = datetime.strptime(
+                        f"{today} "
+                        f"{cutoff_times[meal_type]}",
+                        "%Y-%m-%d %H:%M",
+                    ).replace(
+                        tzinfo=INDIA_TZ
+                    )
+
+                    if india_now >= cutoff_datetime:
+
+                        display_cutoff = (
+                            cutoff_datetime.strftime(
+                                "%I:%M %p"
+                            ).lstrip("0")
+                        )
+
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"{meal_type.capitalize()} "
+                                f"ordering is closed for today. "
+                                f"Order by {display_cutoff}."
                             )
                         )
 
@@ -872,7 +1018,10 @@ async def create_order(
                             menu.image_urls[0]
                             if menu.image_urls
                             else None
-                        )
+                            
+                        ),
+                        meal_type=meal_type,
+                        menu_date=target_date,
                     )
                 )
 
@@ -941,20 +1090,27 @@ async def create_order(
                         f"{special.cutoff_time}",
                         "%Y-%m-%d %H:%M"
                     ).replace(
-                        tzinfo=ZoneInfo("Asia/Kolkata")
+                        tzinfo=INDIA_TZ
                     )
 
                     current_time = datetime.now(
-                        ZoneInfo("Asia/Kolkata")
+                        INDIA_TZ
                     )
 
                     if current_time >= cutoff_datetime:
 
+                        display_cutoff = (
+                            cutoff_datetime.strftime(
+                                "%I:%M %p"
+                            ).lstrip("0")
+                        )
+
                         raise HTTPException(
                             status_code=400,
                             detail=(
-                                "Tomorrow Special ordering closed. "
-                                f"Order by {special.cutoff_time}"
+                                "Tomorrow Special "
+                                "ordering closed. "
+                                f"Order by {display_cutoff}"
                             )
                         )
 
@@ -1092,13 +1248,11 @@ async def create_order(
         # =====================================================
 
         try:
-
             delete_cache(
                 f"dashboard:{chef_id}"
             )
 
         except Exception as cache_error:
-
             print(
                 "⚠️ DASHBOARD CACHE DELETE ERROR:",
                 str(cache_error)
@@ -1119,7 +1273,6 @@ async def create_order(
         if created_at:
 
             if created_at.tzinfo is None:
-
                 created_at = created_at.replace(
                     tzinfo=ZoneInfo("UTC")
                 )

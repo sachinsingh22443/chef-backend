@@ -373,13 +373,19 @@ def add_to_cart(
         # PAST DATE BLOCK
         # -------------------------------------------------
 
+        if target_date > today:
+            raise HTTPException(
+               status_code=400,
+               detail=(
+                "This meal is upcoming. "
+                "You can view it, but ordering is not available yet."
+                ),
+            )
+
         if target_date < today:
             raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Past menu dates are closed. "
-                    "Please select today or a future date."
-                ),
+               status_code=400,
+               detail="Past menu dates are closed.",
             )
 
         # -------------------------------------------------
@@ -431,9 +437,9 @@ def add_to_cart(
         # -------------------------------------------------
 
         cutoff_times = {
-            "breakfast": "08:30",
-            "lunch": "11:00",
-            "dinner": "18:00",
+          "breakfast": "09:00",
+          "lunch": "13:00",
+          "dinner": "20:00",
         }
 
         cutoff_time = cutoff_times[meal_type]
@@ -1026,13 +1032,19 @@ def update_cart(
         # PAST DATE
         # =================================================
 
-        if target_date < today:
-
+        if target_date > today:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Past menu dates are closed."
+                 "This meal is upcoming. "
+                 "You cannot update or order it yet."
                 ),
+            )
+
+        if target_date < today:
+            raise HTTPException(
+              status_code=400,
+              detail="Past menu dates are closed.",
             )
 
         # =================================================
@@ -1087,12 +1099,9 @@ def update_cart(
         # =================================================
 
         cutoff_times = {
-
-            "breakfast": "08:30",
-
-            "lunch": "11:00",
-
-            "dinner": "18:00",
+            "breakfast": "09:00",
+            "lunch": "13:00",
+            "dinner": "20:00",
         }
 
         cutoff_time = cutoff_times[
