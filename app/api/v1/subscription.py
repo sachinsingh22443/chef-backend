@@ -4,6 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
 from uuid import UUID
+from app.core.cache import (
+    get_cache,
+    set_cache,
+    delete_cache,
+)
 import uuid
 from app.models.notification import Notification
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
@@ -270,21 +275,67 @@ def get_plans(
     lng: float = Query(...),
     db: Session = Depends(get_db)
 ):
-    chefs = db.query(User).filter(User.role == "chef").all()
+    # =====================================================
+    # CACHE KEY
+    # Location ko 2 decimal tak round kar rahe hain
+    # taaki nearby requests same cache use karein.
+    # =====================================================
+
+    lat_key = round(lat, 2)
+    lng_key = round(lng, 2)
+
+    cache_key = (
+        f"subscription:plans:"
+        f"{lat_key}:{lng_key}"
+    )
+
+    # =====================================================
+    # CACHE HIT
+    # =====================================================
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Subscription Plans Cache HIT: %s",
+            cache_key
+        )
+        return cached
+
+    logger.info(
+        "🔥 Subscription Plans Cache MISS: %s",
+        cache_key
+    )
+
+    # =====================================================
+    # DATABASE
+    # =====================================================
+
+    chefs = (
+        db.query(User)
+        .filter(User.role == "chef")
+        .all()
+    )
 
     result = []
 
     for chef in chefs:
+
         profile = chef.chef_profile
 
-        # ❌ skip invalid profile
         if not profile:
             continue
 
-        if profile.latitude is None or profile.longitude is None:
+        if (
+            profile.latitude is None
+            or profile.longitude is None
+        ):
             continue
 
-        # 🔥 DISTANCE CALCULATION
+        # =================================================
+        # DISTANCE
+        # =================================================
+
         distance = calculate_distance(
             lat,
             lng,
@@ -292,30 +343,47 @@ def get_plans(
             profile.longitude
         )
 
-        # ❌ skip if >10km
         if distance > 50:
             continue
 
-        # 🔥 GET ANY MENU (subscription के लिए जरूरी)
-        menu = db.query(Menu).filter(
-            Menu.chef_id == chef.id,
-            Menu.is_available == True
-        ).first()
+        # =================================================
+        # GET ANY AVAILABLE MENU
+        # =================================================
+
+        menu = (
+            db.query(Menu)
+            .filter(
+                Menu.chef_id == chef.id,
+                Menu.is_available == True
+            )
+            .first()
+        )
 
         if not menu:
             continue
 
-        # 🔥 🔥 FINAL FIX (chef-wise plans)
-        plans = db.query(SubscriptionPlan).filter(
-            SubscriptionPlan.chef_id == chef.id,   # 🔥 IMPORTANT
-            SubscriptionPlan.is_active == True
-        ).all()
+        # =================================================
+        # CHEF PLANS
+        # =================================================
+
+        plans = (
+            db.query(SubscriptionPlan)
+            .filter(
+                SubscriptionPlan.chef_id == chef.id,
+                SubscriptionPlan.is_active == True
+            )
+            .all()
+        )
 
         if not plans:
             continue
 
-        # 🔥 BUILD RESPONSE
+        # =================================================
+        # BUILD RESPONSE
+        # =================================================
+
         for p in plans:
+
             result.append({
                 "id": p.id,
                 "title": p.title,
@@ -334,19 +402,42 @@ def get_plans(
 
                 "menu_id": str(menu.id),
                 "menu_name": menu.name,
+
                 "goal": p.goal,
                 "diet_type": p.diet_type,
                 "meal_type": p.meal_type or [],
                 "calories_per_day": p.calories_per_day,
                 "duration_days": p.duration_days,
+
                 "breakfast_available": p.breakfast_available,
                 "breakfast_price": p.breakfast_price,
                 "lunch_price": p.lunch_price,
                 "dinner_price": p.dinner_price,
             })
 
-    # 🔥 SORT BY DISTANCE
-    result.sort(key=lambda x: x["distance"])
+    # =====================================================
+    # SORT
+    # =====================================================
+
+    result.sort(
+        key=lambda x: x["distance"]
+    )
+
+    # =====================================================
+    # SAVE CACHE
+    # 2 minutes
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        result,
+        ttl=120,
+    )
+
+    logger.info(
+        "💾 Subscription Plans Cached: %s",
+        cache_key
+    )
 
     return result
 # =========================
@@ -357,6 +448,17 @@ def get_subscriptions(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
+    cache_key = f"subscription:chef:{user.id}"
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Chef Subscriptions Cache HIT: %s",
+            user.id
+        )
+        return cached
+
     subs = db.query(Subscription).filter(
         Subscription.chef_id == user.id
     ).all()
@@ -364,26 +466,43 @@ def get_subscriptions(
     result = []
 
     for s in subs:
+
         plan = db.query(SubscriptionPlan).filter(
             SubscriptionPlan.id == s.plan_id
         ).first()
-        
+
         chef = db.query(User).filter(
-          User.id == s.chef_id
-          ).first()
+            User.id == s.chef_id
+        ).first()
 
         result.append({
             "id": str(s.id),
 
-            "plan": plan.title if plan else "Subscription Plan",
+            "plan": (
+                plan.title
+                if plan
+                else "Subscription Plan"
+            ),
 
-            "plan_type": plan.plan_type if plan else None,
+            "plan_type": (
+                plan.plan_type
+                if plan
+                else None
+            ),
 
-            "chefName": chef.name if chef else "Chef",
+            "chefName": (
+                chef.name
+                if chef
+                else "Chef"
+            ),
 
-            "startDate": s.start_date.strftime("%b %d, %Y"),
+            "startDate": s.start_date.strftime(
+                "%b %d, %Y"
+            ),
 
-            "endDate": s.end_date.strftime("%b %d, %Y"),
+            "endDate": s.end_date.strftime(
+                "%b %d, %Y"
+            ),
 
             "time": s.delivery_time,
 
@@ -393,14 +512,24 @@ def get_subscriptions(
 
             "price": s.price,
 
-            # BREAKFAST
-            "breakfast_enabled": s.breakfast_enabled,
+            "breakfast_enabled": (
+                s.breakfast_enabled
+            ),
 
-            "breakfast_price": s.breakfast_price,
+            "breakfast_price": (
+                s.breakfast_price
+            ),
 
-            # MEALS
-            "meals_per_day": s.meals_per_day,
+            "meals_per_day": (
+                s.meals_per_day
+            ),
         })
+
+    set_cache(
+        cache_key,
+        result,
+        ttl=30
+    )
 
     return result
 
@@ -465,15 +594,15 @@ def create_subscription(
         raise HTTPException(400, "Invalid date range")
 
     delivery_days = [
-    day.strip().lower()[:3]
-    for day in (data.delivery_days or [])
+     day.strip().lower()[:3]
+     for day in (data.delivery_days or [])
     ]
 
     if not delivery_days:
         raise HTTPException(
          status_code=400,
          detail="At least one delivery day is required",
-    )
+        )
 
     # ========= GET MENU (🔥 FIX) =========
     menu = db.query(Menu).filter(Menu.id == data.menu_id).first()
@@ -633,6 +762,18 @@ def create_subscription(
 
         db.commit()
         db.refresh(sub)
+        
+        delete_cache(
+            f"subscription:my:{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:active:{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:chef:{menu.chef_id}"
+        )
 
     except Exception:
         db.rollback()
@@ -780,92 +921,180 @@ def my_active_subscription(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
+    cache_key = f"subscription:active:{user.id}"
+
+    # CACHE HIT
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Active Subscription Cache HIT: %s",
+            user.id
+        )
+        return cached
+
+    # DATABASE
     active = db.query(Subscription).filter(
         Subscription.user_id == user.id,
         Subscription.status == "active"
     ).first()
 
     if not active:
-        return {
+        response = {
             "has_active_subscription": False
         }
 
-    return {
+        set_cache(
+            cache_key,
+            response,
+            ttl=30
+        )
+
+        return response
+
+    response = {
         "has_active_subscription": True,
         "end_date": active.end_date
     }
+
+    set_cache(
+        cache_key,
+        response,
+        ttl=30
+    )
+
+    return response
 
 @router.get("/my")
 def my_subscriptions(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    subs = db.query(Subscription).filter(
-        Subscription.user_id == user.id
-    ).all()
+    # =====================================================
+    # CACHE KEY
+    # =====================================================
+
+    cache_key = (
+        f"subscription:my:{user.id}"
+    )
+
+    # =====================================================
+    # CACHE HIT
+    # =====================================================
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ My Subscription Cache HIT: %s",
+            user.id
+        )
+        return cached
+
+    logger.info(
+        "🔥 My Subscription Cache MISS: %s",
+        user.id
+    )
+
+    # =====================================================
+    # GET SUBSCRIPTIONS
+    # =====================================================
+
+    subs = (
+        db.query(Subscription)
+        .filter(
+            Subscription.user_id == user.id
+        )
+        .all()
+    )
 
     result = []
 
     for s in subs:
-        plan = db.query(SubscriptionPlan).filter(
-            SubscriptionPlan.id == s.plan_id
-        ).first()
 
-        chef = db.query(User).filter(
-            User.id == s.chef_id
-        ).first()
-
-        result.append({
-             "id": str(s.id),
-
-             "plan": plan.title if plan else "Subscription Plan",
-
-             "plan_type": plan.plan_type if plan else None,
-
-             "chefName": chef.name if chef else "Chef",
-
-             "startDate": s.start_date.strftime("%b %d, %Y"),
-
-             "endDate": s.end_date.strftime("%b %d, %Y"),
-
-             "time": s.delivery_time,
-
-             "days": s.delivery_days or [],
-
-             "status": s.status,
-
-             "price": s.price,
-
-             "breakfast_enabled": s.breakfast_enabled,
-             "breakfast_price": s.breakfast_price,
-
-    
-             "meals_per_day": s.meals_per_day,
-            })
-
-    return result
-
-IST = ZoneInfo("Asia/Kolkata")
-
-MEAL_CUTOFF_TIMES = {
-    "breakfast": time(8, 0),
-    "lunch": time(10, 0),
-    "dinner": time(17, 0),
-}
-
-def get_meal_wallet_amount(
-    meal: SubscriptionMealSchedule,
-) -> float:
-
-    amount = meal.meal_price
-
-    if amount is None or amount <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Price is not configured for {meal.meal_type}.",
+        plan = (
+            db.query(SubscriptionPlan)
+            .filter(
+                SubscriptionPlan.id == s.plan_id
+            )
+            .first()
         )
 
-    return amount
+        chef = (
+            db.query(User)
+            .filter(
+                User.id == s.chef_id
+            )
+            .first()
+        )
+
+        result.append({
+            "id": str(s.id),
+
+            "plan": (
+                plan.title
+                if plan
+                else "Subscription Plan"
+            ),
+
+            "plan_type": (
+                plan.plan_type
+                if plan
+                else None
+            ),
+
+            "chefName": (
+                chef.name
+                if chef
+                else "Chef"
+            ),
+
+            "startDate": (
+                s.start_date.strftime("%b %d, %Y")
+            ),
+
+            "endDate": (
+                s.end_date.strftime("%b %d, %Y")
+            ),
+
+            "time": s.delivery_time,
+
+            "days": s.delivery_days or [],
+
+            "status": s.status,
+
+            "price": s.price,
+
+            "breakfast_enabled": (
+                s.breakfast_enabled
+            ),
+
+            "breakfast_price": (
+                s.breakfast_price
+            ),
+
+            "meals_per_day": (
+                s.meals_per_day
+            ),
+        })
+
+    # =====================================================
+    # CACHE
+    # 60 seconds
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        result,
+        ttl=60,
+    )
+
+    logger.info(
+        "💾 My Subscription Cached: %s",
+        user.id
+    )
+
+    return result
 
 
 # =========================================================
@@ -882,6 +1111,22 @@ def get_today_meals(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    
+    cache_key = (
+        f"subscription:today:"
+        f"{subscription_id}:"
+        f"{user.id}"
+    )
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Today's Meals Cache HIT: %s",
+            cache_key
+        )
+        return cached
+
     # =====================================================
     # FIND SUBSCRIPTION
     # =====================================================
@@ -1072,6 +1317,11 @@ def get_today_meals(
                 else None
             ),
         })
+    set_cache(
+        cache_key,
+        result,
+        ttl=30
+    )
 
     return result
 
@@ -1101,6 +1351,26 @@ def get_subscription_meals(
     user=Depends(get_current_user),
 ):
     try:
+        
+                # =====================================================
+        # CACHE
+        # =====================================================
+
+        cache_key = (
+            f"subscription:meals:"
+            f"{subscription_id}:"
+            f"{user.id}:"
+            f"{view_all}"
+        )
+
+        cached = get_cache(cache_key)
+
+        if cached is not None:
+            logger.info(
+                "✅ Subscription Meals Cache HIT: %s",
+                cache_key
+            )
+            return cached
         # =====================================================
         # 1. FIND SUBSCRIPTION
         # =====================================================
@@ -1352,6 +1622,12 @@ def get_subscription_meals(
 
             "days": result_days,
         }
+        
+        set_cache(
+            cache_key,
+            response,
+            ttl=60
+        )
 
     # =========================================================
     # FASTAPI HTTP ERRORS
@@ -1385,6 +1661,20 @@ def get_customer_subscription_menu_cycle(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    cache_key = (
+        f"subscription:menu-cycle:"
+        f"{subscription_id}:"
+        f"{user.id}"
+    )
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Menu Cycle Cache HIT: %s",
+            cache_key
+        )
+        return cached
     # =====================================================
     # 1. FIND CUSTOMER SUBSCRIPTION
     # =====================================================
@@ -1510,6 +1800,11 @@ def get_customer_subscription_menu_cycle(
                 else None
             ),
         })
+    set_cache(
+        cache_key,
+        result,
+        ttl=300
+    )
 
     return result
 
@@ -1698,6 +1993,23 @@ async def turn_meal_off(
 
         db.commit()
         db.refresh(meal)
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{user.id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{user.id}:True"
+        )
         
         # -------------------------------------------------
 # WHATSAPP ADMIN NOTIFICATION
@@ -1939,6 +2251,23 @@ async def turn_meal_on(
 
         db.commit()
         db.refresh(meal)
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{user.id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{user.id}:True"
+        )
         try:
             await send_subscription_meal_whatsapp(
              customer_name=user.name,
@@ -2545,6 +2874,38 @@ def verify_breakfast_payment(
         db.commit()
 
         db.refresh(subscription)
+        
+        delete_cache(
+            f"subscription:my:{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:active:{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{user.id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{user.id}:True"
+        )
+
+        delete_cache(
+            f"subscription:menu-cycle:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
 
         # =========================================
         # SUCCESS RESPONSE
@@ -2743,6 +3104,34 @@ def save_subscription_plan_menu_cycle(
     # -----------------------------------------------------
 
     db.commit()
+    subscriptions = (
+        db.query(Subscription)
+        .filter(
+            Subscription.plan_id == plan.id,
+            Subscription.status == "active",
+        )
+        .all()
+    )
+
+    for subscription in subscriptions:
+
+        delete_cache(
+            f"subscription:menu-cycle:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:True"
+        )
 
     return {
         "success": True,

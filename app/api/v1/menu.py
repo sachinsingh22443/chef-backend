@@ -229,6 +229,10 @@ async def create_menu(
     db.add(menu)
     db.commit()
     delete_cache(f"menu:{user.id}")
+    current_date = datetime.now(INDIA_TZ).date()
+    delete_cache(
+     f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+    )
     db.refresh(menu)
 
     return menu
@@ -329,6 +333,10 @@ async def update_menu(
 
     db.commit()
     delete_cache(f"menu:{user.id}")
+    current_date = datetime.now(INDIA_TZ).date()
+    delete_cache(
+     f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+    )
     db.refresh(menu)
 
     return {"msg": "Menu updated", "images": menu.image_urls}
@@ -357,6 +365,10 @@ def delete_menu(
 
     db.commit()
     delete_cache(f"menu:{user.id}")
+    current_date = datetime.now(INDIA_TZ).date()
+    delete_cache(
+      f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+    )
     return {"msg": "Menu deleted successfully"}
 
 
@@ -433,6 +445,10 @@ def get_menus(
 # CUSTOMER - CHEF 7 DAY MENU
 # =========================================================
 
+# =========================================================
+# CUSTOMER - CHEF 7 DAY MENU
+# =========================================================
+
 @router.get("/chef/{chef_id}/7-days")
 def get_chef_7_day_menu(
     chef_id: UUID,
@@ -444,25 +460,43 @@ def get_chef_7_day_menu(
     Returns:
         Today + next 6 days
 
-    Each day:
-        breakfast
-        lunch
-        dinner
-
     Rules:
         - Only 7 days are returned
         - Today's meals can be ordered before cutoff
         - Future meals are visible
         - Future meals cannot be ordered
-        - Menu is resolved from the chef's cycle
+        - Menu is resolved from chef's 30-day cycle
+        - Redis cached for fast loading
     """
 
     # =====================================================
     # INDIA DATE / TIME
     # =====================================================
 
-    today = datetime.now(INDIA_TZ).date()
     now = datetime.now(INDIA_TZ)
+    today = now.date()
+
+    # =====================================================
+    # REDIS CACHE
+    # =====================================================
+
+    cache_key = (
+        f"chef:7day-menu:"
+        f"{chef_id}:"
+        f"{today.isoformat()}"
+    )
+
+    cached = get_cache(cache_key)
+
+    if cached:
+        print(
+            f"✅ 7-Day Chef Menu Cache Hit: {chef_id}"
+        )
+        return cached
+
+    print(
+        f"🔥 7-Day Chef Menu Cache Miss: {chef_id}"
+    )
 
     # =====================================================
     # VERIFY CHEF
@@ -563,7 +597,10 @@ def get_chef_7_day_menu(
                 meal_status = "out_of_stock"
                 can_order = False
 
-            elif menu.quantity is None or menu.quantity <= 0:
+            elif (
+                menu.quantity is None
+                or menu.quantity <= 0
+            ):
 
                 meal_status = "out_of_stock"
                 can_order = False
@@ -649,7 +686,7 @@ def get_chef_7_day_menu(
     # FINAL RESPONSE
     # =====================================================
 
-    return {
+    response = {
         "success": True,
 
         "chef_id": str(chef_id),
@@ -665,7 +702,22 @@ def get_chef_7_day_menu(
 
         "days": days,
     }
-    
+
+    # =====================================================
+    # SAVE REDIS CACHE
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        response,
+        ttl=60,
+    )
+
+    print(
+        f"💾 7-Day Chef Menu Cached: {chef_id}"
+    )
+
+    return response
     
 @router.get("/chef/{chef_id}")
 def get_chef_with_menu(
@@ -1061,14 +1113,18 @@ def toggle_menu(
     
     if menu.chef_id != user.id:
         raise HTTPException(
-        status_code=403,
-        detail="Not allowed"
+         status_code=403,
+         detail="Not allowed"
         )
 
     menu.is_available = is_available
 
     db.commit()
     delete_cache(f"menu:{user.id}")
+    current_date = datetime.now(INDIA_TZ).date()
+    delete_cache(
+      f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+    )
     return {
         "success": True,
         "is_available": menu.is_available
@@ -1229,6 +1285,16 @@ def create_or_update_menu_cycle(
     try:
 
         db.commit()
+        current_date = datetime.now(INDIA_TZ).date()
+
+        delete_cache(
+           f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+        )
+
+    # Clear normal chef menu cache
+        delete_cache(
+           f"menu:{user.id}"
+        )
 
     except Exception as e:
 
@@ -1405,7 +1471,18 @@ def create_or_update_date_override(
     try:
 
         db.commit()
+        current_date = datetime.now(INDIA_TZ).date()
+
+        delete_cache(
+          f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+        )
+
+    # Clear normal chef menu cache
+        delete_cache(
+          f"menu:{user.id}"
+        )
         db.refresh(override)
+        
 
     except Exception:
 
@@ -1453,6 +1530,16 @@ def delete_date_override(
     try:
 
         db.commit()
+        current_date = datetime.now(INDIA_TZ).date()
+
+        delete_cache(
+         f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+        )
+
+    # Clear normal chef menu cache
+        delete_cache(
+           f"menu:{user.id}"
+        )
 
     except Exception:
 
