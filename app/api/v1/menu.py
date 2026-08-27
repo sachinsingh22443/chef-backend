@@ -1020,32 +1020,77 @@ def get_chef_with_menu(
 # get all chefs 
 
 @router.get("/chefs")
-def get_all_chefs(db: Session = Depends(get_db)):
+def get_all_chefs(
+    db: Session = Depends(get_db)
+):
+    """
+    CUSTOMER - GET ALL CHEFS
+
+    Production optimized:
+    - Redis cache
+    - Only required columns fetched
+    - No unnecessary ORM relationship loading
+    - Existing API behavior preserved
+    """
+
+    # =====================================================
+    # REDIS CACHE
+    # =====================================================
+
+    cache_key = "chefs:v1:all"
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        return cached
+
+    # =====================================================
+    # FETCH CHEFS
+    # =====================================================
+
     chefs = (
-        db.query(User)
-        .options(selectinload(User.chef_profile))
-        .filter(User.role == "chef")
+        db.query(
+            User.id,
+            User.name,
+            ChefProfile.profile_image,
+            ChefProfile.specialties,
+        )
+        .outerjoin(
+            ChefProfile,
+            ChefProfile.user_id == User.id,
+        )
+        .filter(
+            User.role == "chef",
+        )
         .order_by(User.name.asc())
         .all()
     )
 
-    return [
+    # =====================================================
+    # BUILD RESPONSE
+    # =====================================================
+
+    response = [
         {
             "id": str(chef.id),
             "name": chef.name,
-            "profile_image": (
-                chef.chef_profile.profile_image
-                if chef.chef_profile
-                else None
-            ),
-            "specialties": (
-                chef.chef_profile.specialties
-                if chef.chef_profile
-                else None
-            ),
+            "profile_image": chef.profile_image,
+            "specialties": chef.specialties,
         }
         for chef in chefs
     ]
+
+    # =====================================================
+    # SAVE CACHE
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        response,
+        ttl=300,
+    )
+
+    return response
     
     
 from math import radians, cos, sin, asin, sqrt
