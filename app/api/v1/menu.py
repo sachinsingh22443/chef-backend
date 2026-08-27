@@ -1,3 +1,4 @@
+from app.models.user import ChefProfile, User
 from app.core.cache import get_cache, set_cache
 from app.core.cache import delete_cache
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, Form, File
@@ -877,26 +878,49 @@ def get_chef_with_menu(
     chef_id: UUID,
     db: Session = Depends(get_db)
 ):
-    # =========================
-    # Redis Cache
-    # =========================
-    cache_key = f"menu:{chef_id}"
+    """
+    CUSTOMER - GET CHEF WITH MENU
+
+    Production optimized:
+    - Redis first
+    - Only required User fields are loaded
+    - Chef profile loaded in the same DB query
+    - Only required Menu columns are loaded
+    - JSON-ready response is cached
+    """
+
+    # =====================================================
+    # REDIS CACHE
+    # =====================================================
+
+    cache_key = f"menu:v2:chef:{chef_id}"
 
     cached = get_cache(cache_key)
 
-    if cached:
-        print("✅ Chef Menu Cache Hit")
+    if cached is not None:
         return cached
 
-    # =========================
-    # Chef
-    # =========================
+    # =====================================================
+    # CHEF + CHEF PROFILE
+    # =====================================================
+
     chef = (
-        db.query(User)
-        .options(selectinload(User.chef_profile))
+        db.query(
+            User.id,
+            User.name,
+            ChefProfile.bio,
+            ChefProfile.location,
+            ChefProfile.specialties,
+            ChefProfile.profile_image,
+        )
+        .outerjoin(
+            ChefProfile,
+            ChefProfile.user_id == User.id,
+        )
         .filter(
             User.id == chef_id,
-            User.role == "chef"
+            User.role == "chef",
+            User.is_active == True,
         )
         .first()
     )
@@ -904,30 +928,47 @@ def get_chef_with_menu(
     if not chef:
         raise HTTPException(
             status_code=404,
-            detail="Chef not found"
+            detail="Chef not found",
         )
 
-    # =========================
-    # Menus
-    # =========================
+    # =====================================================
+    # MENUS
+    # =====================================================
+
     menus = (
-        db.query(Menu)
+        db.query(
+            Menu.id,
+            Menu.chef_id,
+            Menu.name,
+            Menu.description,
+            Menu.price,
+            Menu.prep_time,
+            Menu.quantity,
+            Menu.category,
+            Menu.food_type,
+            Menu.calories,
+            Menu.protein,
+            Menu.carbs,
+            Menu.fats,
+            Menu.ingredients,
+            Menu.image_urls,
+            Menu.is_available,
+        )
         .filter(
             Menu.chef_id == chef_id,
             Menu.is_available == True,
-            Menu.is_deleted == False
+            Menu.is_deleted == False,
         )
         .order_by(Menu.name.asc())
         .all()
     )
 
-    # =========================
-    # JSON Serializable Menu
-    # =========================
-    menu_data = []
+    # =====================================================
+    # SERIALIZE MENU
+    # =====================================================
 
-    for menu in menus:
-        menu_data.append({
+    menu_data = [
+        {
             "id": str(menu.id),
             "chef_id": str(menu.chef_id),
             "name": menu.name,
@@ -943,28 +984,36 @@ def get_chef_with_menu(
             "fats": menu.fats,
             "ingredients": menu.ingredients,
             "image_urls": menu.image_urls,
-            "is_available": menu.is_available
-        })
+            "is_available": menu.is_available,
+        }
+        for menu in menus
+    ]
 
-    # =========================
-    # Response
-    # =========================
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
     response = {
         "chef": {
             "id": str(chef.id),
             "name": chef.name,
-            "bio": chef.chef_profile.bio if chef.chef_profile else None,
-            "location": chef.chef_profile.location if chef.chef_profile else None,
-            "specialties": chef.chef_profile.specialties if chef.chef_profile else None,
-            "profile_image": chef.chef_profile.profile_image if chef.chef_profile else None,
+            "bio": chef.bio,
+            "location": chef.location,
+            "specialties": chef.specialties,
+            "profile_image": chef.profile_image,
         },
-        "menus": menu_data
+        "menus": menu_data,
     }
 
-    # =========================
-    # Save Cache
-    # =========================
-    set_cache(cache_key, response, ttl=300)
+    # =====================================================
+    # SAVE REDIS CACHE
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        response,
+        ttl=300,
+    )
 
     return response
     
@@ -1119,7 +1168,6 @@ def get_nearby_chefs(
     return nearby_chefs
 
 # set location
-from app.models.user import ChefProfile, User
 # from fastapi import APIRouter, Depends, Form, HTTPException
 # from sqlalchemy.orm import Session
 
