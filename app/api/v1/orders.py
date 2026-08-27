@@ -5,6 +5,7 @@ from app.models.menu_date_override import MenuDateOverride
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from sqlalchemy import or_
+from app.core.cache import get_cache, set_cache
 import os
 from app.core.cache import delete_cache
 from app.services.whatsapp import send_new_order_whatsapp
@@ -280,56 +281,80 @@ def get_chef_orders(
 @router.get("/")
 def get_my_orders(
     db: Session = Depends(get_db),
-    user=Depends(get_current_user)
+    user=Depends(get_current_user),
 ):
+    # =====================================================
+    # CACHE KEY
+    # =====================================================
+
+    cache_key = f"orders:v1:user:{user.id}"
+
+    # =====================================================
+    # CACHE HIT
+    # =====================================================
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        return cached
+
+    # =====================================================
+    # DATABASE
+    # =====================================================
+
     orders = (
         db.query(Order)
-        .options(selectinload(Order.items))
-        .filter(Order.user_id == user.id)
-        .order_by(Order.created_at.desc())
+        .options(
+            selectinload(Order.items)
+        )
+        .filter(
+            Order.user_id == user.id
+        )
+        .order_by(
+            Order.created_at.desc()
+        )
         .all()
     )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
     result = []
 
     for order in orders:
 
-        # 🇮🇳 Convert database UTC time → India time
-        created_at = order.created_at
-
-        if created_at:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(
-                    tzinfo=ZoneInfo("UTC")
-                )
-
-            created_at = created_at.astimezone(
-                ZoneInfo("Asia/Kolkata")
-            )
-
         result.append({
             "id": str(order.id),
             "status": order.status,
-            "total_price": float(order.total_price or 0),
-
-            # 🇮🇳 Correct IST time
+            "total_price": order.total_price,
             "created_at": (
-                created_at.isoformat()
-                if created_at
+                order.created_at.isoformat()
+                if order.created_at
                 else None
             ),
 
-            "address": order.address,
-
             "items": [
                 {
+                    "id": str(item.id),
                     "name": item.item_name,
                     "quantity": item.quantity,
-                    "price": float(item.price or 0),
+                    "price": item.price,
+                    "image": item.item_image,
                 }
                 for item in order.items
-            ]
+            ],
         })
+
+    # =====================================================
+    # CACHE
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        result,
+        ttl=30,
+    )
 
     return result
     
@@ -1242,6 +1267,7 @@ async def create_order(
         # =====================================================
 
         db.commit()
+        delete_cache(f"orders:v1:user:{user.id}")
 
         # =====================================================
         # 🧹 CHEF DASHBOARD CACHE
@@ -1470,6 +1496,7 @@ async def confirm_cod_order(
         # =========================
         db.commit()
         db.refresh(order)
+        delete_cache(f"orders:v1:user:{order.user_id}")
 
         # =========================
         # CLEAR CART
@@ -1825,6 +1852,7 @@ async def verify_payment(
             db.delete(cart)
 
         db.commit()
+        delete_cache(f"orders:v1:user:{order.user_id}")
         try:
 
             items_text = ", ".join(
@@ -2003,6 +2031,7 @@ def update_status(
 
     db.commit()
     delete_cache(f"dashboard:{order.chef_id}")
+    delete_cache(f"orders:v1:user:{order.user_id}")
 
     return {"msg": "updated", "status": status}
 

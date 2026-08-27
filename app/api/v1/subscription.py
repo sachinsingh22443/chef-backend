@@ -542,9 +542,31 @@ def today_deliveries(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    subs = db.query(Subscription).filter(
-        Subscription.chef_id == user.id
-    ).all()
+    cache_key = f"subscription:today-deliveries:{user.id}"
+
+    # CACHE HIT
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Today Deliveries Cache HIT: %s",
+            user.id
+        )
+        return cached
+
+    logger.info(
+        "🔥 Today Deliveries Cache MISS: %s",
+        user.id
+    )
+
+    # DATABASE
+    subs = (
+        db.query(Subscription)
+        .filter(
+            Subscription.chef_id == user.id
+        )
+        .all()
+    )
 
     deliveries = []
 
@@ -556,6 +578,18 @@ def today_deliveries(
             "address": s.address,
             "status": "pending"
         })
+
+    # CACHE — short TTL
+    set_cache(
+        cache_key,
+        deliveries,
+        ttl=20
+    )
+
+    logger.info(
+        "💾 Today Deliveries Cached: %s",
+        user.id
+    )
 
     return deliveries
 
@@ -795,11 +829,87 @@ def get_chef_plans(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    plans = db.query(SubscriptionPlan).filter(
-        SubscriptionPlan.chef_id == user.id
-    ).all()
+    # =====================================================
+    # CACHE KEY
+    # =====================================================
 
-    return plans
+    cache_key = f"subscription:chef:plans:{user.id}"
+
+    # =====================================================
+    # CACHE HIT
+    # =====================================================
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Chef Plans Cache HIT: %s",
+            user.id
+        )
+        return cached
+
+    logger.info(
+        "🔥 Chef Plans Cache MISS: %s",
+        user.id
+    )
+
+    # =====================================================
+    # DATABASE
+    # =====================================================
+
+    plans = (
+        db.query(SubscriptionPlan)
+        .filter(
+            SubscriptionPlan.chef_id == user.id
+        )
+        .all()
+    )
+
+    # =====================================================
+    # BUILD RESPONSE
+    # =====================================================
+
+    result = [
+        {
+            "id": str(plan.id),
+            "title": plan.title,
+            "price": plan.price,
+            "plan_type": plan.plan_type,
+            "description": plan.description,
+            "tagline": plan.tagline,
+            "emoji": plan.emoji,
+            "color": plan.color,
+            "features": plan.features or [],
+            "includes": plan.includes or [],
+            "goal": plan.goal,
+            "diet_type": plan.diet_type,
+            "meal_type": plan.meal_type or [],
+            "calories_per_day": plan.calories_per_day,
+            "duration_days": plan.duration_days,
+            "breakfast_available": plan.breakfast_available,
+            "breakfast_price": plan.breakfast_price,
+            "lunch_price": plan.lunch_price,
+            "dinner_price": plan.dinner_price,
+        }
+        for plan in plans
+    ]
+
+    # =====================================================
+    # SAVE CACHE
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        result,
+        ttl=300
+    )
+
+    logger.info(
+        "💾 Chef Plans Cached: %s",
+        user.id
+    )
+
+    return result
 
 # CREATE PLAN
 @router.post("/chef/plans")
@@ -970,13 +1080,23 @@ def my_subscriptions(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
+    """
+    CUSTOMER MY SUBSCRIPTIONS
+
+    Optimized:
+    - Redis cache
+    - Single database query
+    - JOIN SubscriptionPlan
+    - JOIN Chef/User
+    - Removes N+1 queries
+    - Response structure remains unchanged
+    """
+
     # =====================================================
     # CACHE KEY
     # =====================================================
 
-    cache_key = (
-        f"subscription:my:{user.id}"
-    )
+    cache_key = f"subscription:my:{user.id}"
 
     # =====================================================
     # CACHE HIT
@@ -997,39 +1117,48 @@ def my_subscriptions(
     )
 
     # =====================================================
-    # GET SUBSCRIPTIONS
+    # SINGLE DATABASE QUERY
+    # =====================================================
+    # Previously:
+    #
+    # 1 query -> subscriptions
+    # + 1 query per subscription -> plan
+    # + 1 query per subscription -> chef
+    #
+    # Now:
+    # ONE query using JOINs.
     # =====================================================
 
-    subs = (
-        db.query(Subscription)
+    rows = (
+        db.query(
+            Subscription,
+            SubscriptionPlan,
+            User,
+        )
+        .outerjoin(
+            SubscriptionPlan,
+            SubscriptionPlan.id == Subscription.plan_id,
+        )
+        .outerjoin(
+            User,
+            User.id == Subscription.chef_id,
+        )
         .filter(
             Subscription.user_id == user.id
         )
         .all()
     )
 
+    # =====================================================
+    # BUILD RESPONSE
+    # =====================================================
+
     result = []
 
-    for s in subs:
-
-        plan = (
-            db.query(SubscriptionPlan)
-            .filter(
-                SubscriptionPlan.id == s.plan_id
-            )
-            .first()
-        )
-
-        chef = (
-            db.query(User)
-            .filter(
-                User.id == s.chef_id
-            )
-            .first()
-        )
+    for subscription, plan, chef in rows:
 
         result.append({
-            "id": str(s.id),
+            "id": str(subscription.id),
 
             "plan": (
                 plan.title
@@ -1050,43 +1179,49 @@ def my_subscriptions(
             ),
 
             "startDate": (
-                s.start_date.strftime("%b %d, %Y")
+                subscription.start_date.strftime("%b %d, %Y")
+                if subscription.start_date
+                else None
             ),
 
             "endDate": (
-                s.end_date.strftime("%b %d, %Y")
+                subscription.end_date.strftime("%b %d, %Y")
+                if subscription.end_date
+                else None
             ),
 
-            "time": s.delivery_time,
+            "time": subscription.delivery_time,
 
-            "days": s.delivery_days or [],
+            "days": (
+                subscription.delivery_days
+                or []
+            ),
 
-            "status": s.status,
+            "status": subscription.status,
 
-            "price": s.price,
+            "price": subscription.price,
 
             "breakfast_enabled": (
-                s.breakfast_enabled
+                subscription.breakfast_enabled
             ),
 
             "breakfast_price": (
-                s.breakfast_price
+                subscription.breakfast_price
             ),
 
             "meals_per_day": (
-                s.meals_per_day
+                subscription.meals_per_day
             ),
         })
 
     # =====================================================
-    # CACHE
-    # 60 seconds
+    # SAVE CACHE
     # =====================================================
 
     set_cache(
         cache_key,
         result,
-        ttl=60,
+        ttl=60
     )
 
     logger.info(
@@ -1095,7 +1230,6 @@ def my_subscriptions(
     )
 
     return result
-
 
 # =========================================================
 # GET TODAY'S MEAL SCHEDULE
@@ -2841,7 +2975,7 @@ def verify_breakfast_payment(
 
                     cutoff_at = datetime.combine(
                         current_date,
-                        MEAL_CUTOFF_TIMES["breakfast"],
+                         MEAL_CUTOFF_TIMES["breakfast"],
                         tzinfo=IST,
                     )
 
