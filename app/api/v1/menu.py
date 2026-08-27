@@ -460,13 +460,20 @@ def get_chef_7_day_menu(
     Returns:
         Today + next 6 days
 
+    Optimized production version:
+        - Redis cache
+        - Single query for chef
+        - Single query for date overrides
+        - Single query for all applicable menu cycles
+        - Single query for required menus
+        - No repeated DB queries inside 7 x 3 meal loops
+
     Rules:
         - Only 7 days are returned
         - Today's meals can be ordered before cutoff
         - Future meals are visible
         - Future meals cannot be ordered
         - Menu is resolved from chef's 30-day cycle
-        - Redis cached for fast loading
     """
 
     # =====================================================
@@ -475,6 +482,7 @@ def get_chef_7_day_menu(
 
     now = datetime.now(INDIA_TZ)
     today = now.date()
+    end_date = today + timedelta(days=CUSTOMER_MENU_DAYS - 1)
 
     # =====================================================
     # REDIS CACHE
@@ -488,22 +496,15 @@ def get_chef_7_day_menu(
 
     cached = get_cache(cache_key)
 
-    if cached:
-        print(
-            f"✅ 7-Day Chef Menu Cache Hit: {chef_id}"
-        )
+    if cached is not None:
         return cached
-
-    print(
-        f"🔥 7-Day Chef Menu Cache Miss: {chef_id}"
-    )
 
     # =====================================================
     # VERIFY CHEF
     # =====================================================
 
-    chef = (
-        db.query(User)
+    chef_exists = (
+        db.query(User.id)
         .filter(
             User.id == chef_id,
             User.role == "chef",
@@ -511,17 +512,203 @@ def get_chef_7_day_menu(
         .first()
     )
 
-    if not chef:
+    if not chef_exists:
         raise HTTPException(
             status_code=404,
             detail="Chef not found",
         )
 
     # =====================================================
-    # BUILD 7 DAYS
+    # 1. LOAD ALL DATE OVERRIDES FOR 7 DAYS
+    # =====================================================
+
+    overrides = (
+        db.query(MenuDateOverride)
+        .filter(
+            MenuDateOverride.chef_id == chef_id,
+            MenuDateOverride.menu_date >= today,
+            MenuDateOverride.menu_date <= end_date,
+        )
+        .all()
+    )
+
+    override_map = {
+        override.menu_date: override.menu_id
+        for override in overrides
+    }
+
+    # =====================================================
+    # 2. LOAD ALL APPLICABLE MENU CYCLES
+    #
+    # We load cycles whose start date is <= end_date.
+    # Later, Python selects the latest applicable cycle
+    # for each target date.
+    # =====================================================
+
+    cycles = (
+        db.query(MenuCycle)
+        .filter(
+            MenuCycle.chef_id == chef_id,
+            MenuCycle.cycle_start_date <= end_date,
+            MenuCycle.meal_type.in_(
+                ["breakfast", "lunch", "dinner"]
+            ),
+        )
+        .order_by(
+            MenuCycle.cycle_start_date.desc()
+        )
+        .all()
+    )
+
+    # =====================================================
+    # 3. RESOLVE MENU IDS FIRST
+    # =====================================================
+
+    required_menu_ids = set()
+
+    # Mapping:
+    # (target_date, meal_type) -> menu_id
+    resolved_menu_ids = {}
+
+    meal_types = (
+        "breakfast",
+        "lunch",
+        "dinner",
+    )
+
+    # Group cycles by cycle start date
+    cycles_by_start_date = {}
+
+    for cycle in cycles:
+        cycles_by_start_date.setdefault(
+            cycle.cycle_start_date,
+            []
+        ).append(cycle)
+
+    cycle_start_dates = sorted(
+        cycles_by_start_date.keys(),
+        reverse=True,
+    )
+
+    # =====================================================
+    # RESOLVE EACH DATE + MEAL
+    # =====================================================
+
+    for offset in range(CUSTOMER_MENU_DAYS):
+
+        target_date = today + timedelta(days=offset)
+
+        for meal_type in meal_types:
+
+            # -------------------------------------------------
+            # PRIORITY 1: DATE OVERRIDE
+            # -------------------------------------------------
+
+            override_menu_id = override_map.get(target_date)
+
+            if override_menu_id is not None:
+                resolved_menu_ids[
+                    (target_date, meal_type)
+                ] = override_menu_id
+
+                required_menu_ids.add(
+                    override_menu_id
+                )
+
+                continue
+
+            # -------------------------------------------------
+            # PRIORITY 2: LATEST APPLICABLE CYCLE
+            # -------------------------------------------------
+
+            selected_cycle_start = None
+
+            for cycle_start_date in cycle_start_dates:
+
+                if cycle_start_date <= target_date:
+                    selected_cycle_start = cycle_start_date
+                    break
+
+            if selected_cycle_start is None:
+                resolved_menu_ids[
+                    (target_date, meal_type)
+                ] = None
+                continue
+
+            # -------------------------------------------------
+            # CALCULATE CYCLE DAY
+            # -------------------------------------------------
+
+            days_elapsed = (
+                target_date - selected_cycle_start
+            ).days
+
+            cycle_day = (
+                days_elapsed % MENU_CYCLE_DAYS
+            ) + 1
+
+            # -------------------------------------------------
+            # FIND EXACT CYCLE ENTRY
+            # -------------------------------------------------
+
+            selected_menu_id = None
+
+            for cycle in cycles_by_start_date.get(
+                selected_cycle_start,
+                []
+            ):
+                if (
+                    cycle.cycle_day == cycle_day
+                    and cycle.meal_type.lower().strip()
+                    == meal_type
+                ):
+                    selected_menu_id = cycle.menu_id
+                    break
+
+            resolved_menu_ids[
+                (target_date, meal_type)
+            ] = selected_menu_id
+
+            if selected_menu_id is not None:
+                required_menu_ids.add(
+                    selected_menu_id
+                )
+
+    # =====================================================
+    # 4. LOAD ALL REQUIRED MENUS IN ONE QUERY
+    # =====================================================
+
+    menu_map = {}
+
+    if required_menu_ids:
+
+        menus = (
+            db.query(Menu)
+            .filter(
+                Menu.id.in_(required_menu_ids),
+                Menu.chef_id == chef_id,
+                Menu.is_deleted == False,
+                Menu.is_available == True,
+            )
+            .all()
+        )
+
+        menu_map = {
+            menu.id: menu
+            for menu in menus
+        }
+
+    # =====================================================
+    # 5. BUILD 7 DAY RESPONSE
     # =====================================================
 
     days = []
+
+    cutoff_times = {
+        "breakfast": (9, 0),
+        "lunch": (13, 0),
+        "dinner": (20, 0),
+    }
 
     for offset in range(CUSTOMER_MENU_DAYS):
 
@@ -529,36 +716,25 @@ def get_chef_7_day_menu(
 
         meals = []
 
-        # =================================================
-        # BREAKFAST / LUNCH / DINNER
-        # =================================================
+        for meal_type in meal_types:
 
-        for meal_type in (
-            "breakfast",
-            "lunch",
-            "dinner",
-        ):
+            # -------------------------------------------------
+            # GET RESOLVED MENU
+            # -------------------------------------------------
 
-            # ---------------------------------------------
-            # GET MENU
-            # ---------------------------------------------
-
-            menu = get_cycle_menu_for_date(
-                db=db,
-                chef_id=chef_id,
-                target_date=target_date,
-                meal_type=meal_type,
+            menu_id = resolved_menu_ids.get(
+                (target_date, meal_type)
             )
 
-            # ---------------------------------------------
-            # CUTOFF TIME
-            # ---------------------------------------------
+            menu = (
+                menu_map.get(menu_id)
+                if menu_id is not None
+                else None
+            )
 
-            cutoff_times = {
-                "breakfast": (9, 0),
-                "lunch": (13, 0),
-                "dinner": (20, 0),
-            }
+            # -------------------------------------------------
+            # CUTOFF TIME
+            # -------------------------------------------------
 
             cutoff_hour, cutoff_minute = (
                 cutoff_times[meal_type]
@@ -573,9 +749,9 @@ def get_chef_7_day_menu(
                 tzinfo=INDIA_TZ,
             )
 
-            # ---------------------------------------------
+            # -------------------------------------------------
             # STATUS
-            # ---------------------------------------------
+            # -------------------------------------------------
 
             if menu is None:
 
@@ -610,9 +786,9 @@ def get_chef_7_day_menu(
                 meal_status = "available"
                 can_order = True
 
-            # ---------------------------------------------
+            # -------------------------------------------------
             # SERIALIZE MENU
-            # ---------------------------------------------
+            # -------------------------------------------------
 
             menu_data = None
 
@@ -637,69 +813,50 @@ def get_chef_7_day_menu(
                     "is_available": menu.is_available,
                 }
 
-            # ---------------------------------------------
+            # -------------------------------------------------
             # MEAL RESPONSE
-            # ---------------------------------------------
+            # -------------------------------------------------
 
             meals.append(
                 {
                     "meal_type": meal_type,
-
                     "cutoff_time": (
                         f"{cutoff_hour:02d}:"
                         f"{cutoff_minute:02d}"
                     ),
-
                     "meal_status": meal_status,
-
                     "can_order": can_order,
-
                     "menu": menu_data,
                 }
             )
 
-        # =================================================
+        # =====================================================
         # DAY RESPONSE
-        # =================================================
+        # =====================================================
 
         days.append(
             {
-                "date": target_date,
-
-                "is_today": (
-                    target_date == today
-                ),
-
-                "is_past": (
-                    target_date < today
-                ),
-
-                "is_upcoming": (
-                    target_date > today
-                ),
-
+                "date": target_date.isoformat(),
+                "is_today": target_date == today,
+                "is_past": target_date < today,
+                "is_upcoming": target_date > today,
                 "meals": meals,
             }
         )
 
     # =====================================================
     # FINAL RESPONSE
+    #
+    # IMPORTANT:
+    # Dates are converted to ISO strings so Redis
+    # json.dumps() can safely serialize the response.
     # =====================================================
 
     response = {
         "success": True,
-
         "chef_id": str(chef_id),
-
-        "start_date": today,
-
-        "end_date": (
-            today
-            + timedelta(
-                days=CUSTOMER_MENU_DAYS - 1
-            )
-        ),
-
+        "start_date": today.isoformat(),
+        "end_date": end_date.isoformat(),
         "days": days,
     }
 
@@ -711,10 +868,6 @@ def get_chef_7_day_menu(
         cache_key,
         response,
         ttl=60,
-    )
-
-    print(
-        f"💾 7-Day Chef Menu Cached: {chef_id}"
     )
 
     return response
