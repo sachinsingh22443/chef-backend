@@ -14,70 +14,110 @@ def get_profile(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user)
 ):
-    chef = current_user.chef_profile
+    """
+    CUSTOMER / CHEF PROFILE
 
-    # =========================
-    # 🔥 ROLE BASED ORDERS
-    # =========================
+    Optimized:
+    - Reuses authenticated user from get_current_user()
+    - Avoids unnecessary profile relationship query for customers
+    - Keeps order count dynamic
+    - Keeps chef rating dynamic
+    - Response structure remains unchanged
+    """
+
+    # =====================================================
+    # CHEF PROFILE
+    # =====================================================
+
+    chef = None
+
+    if current_user.role == "chef":
+        chef = current_user.chef_profile
+
+    # =====================================================
+    # TOTAL ORDERS
+    # =====================================================
+
     if current_user.role == "chef":
         total_orders = (
-          db.query(func.count(Order.id))
-          .filter(
-            Order.chef_id == current_user.id,
-            Order.status != "cancelled"
-           )
-          .scalar() or 0
-          )
-    else:
-        total_orders = (
-           db.query(func.count(Order.id))
-           .filter(
-            Order.user_id == current_user.id,
-            Order.status != "cancelled"
+            db.query(func.count(Order.id))
+            .filter(
+                Order.chef_id == current_user.id,
+                Order.status != "cancelled",
             )
-             .scalar() or 0
-            )
-
-    # =========================
-    # ⭐ RATING (ONLY CHEF)
-    # =========================
-    avg_rating = 0
-    if current_user.role == "chef":
-        avg_rating = (
-          db.query(func.avg(Review.rating))
-          .filter(Review.chef_id == current_user.id)
-          .scalar() or 0
+            .scalar()
+            or 0
         )
 
-        avg_rating = round(avg_rating, 1)
+    else:
+        total_orders = (
+            db.query(func.count(Order.id))
+            .filter(
+                Order.user_id == current_user.id,
+                Order.status != "cancelled",
+            )
+            .scalar()
+            or 0
+        )
 
-    # =========================
-    # 🖼 PROFILE IMAGE FIX
-    # =========================
+    # =====================================================
+    # RATING - CHEF ONLY
+    # =====================================================
+
+    avg_rating = 0
+
+    if current_user.role == "chef":
+        avg_rating = (
+            db.query(func.avg(Review.rating))
+            .filter(
+                Review.chef_id == current_user.id
+            )
+            .scalar()
+            or 0
+        )
+
+        avg_rating = round(float(avg_rating), 1)
+
+    # =====================================================
+    # PROFILE IMAGE
+    # =====================================================
+
     if chef and chef.profile_image:
         profile_image = chef.profile_image
     else:
-        profile_image = getattr(current_user, "profile_image", None)
+        profile_image = getattr(
+            current_user,
+            "profile_image",
+            None,
+        )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
     return {
         "id": str(current_user.id),
         "name": current_user.name,
         "email": current_user.email,
         "phone": current_user.phone,
-        "role": current_user.role,  # 🔥 ADD THIS
+        "role": current_user.role,
 
-        # 👇 chef only fields
+        # Chef fields
         "bio": chef.bio if chef else None,
         "location": chef.location if chef else None,
         "specialties": chef.specialties if chef else None,
 
-        # 👇 fixed
+        # Profile image
         "profile_image": profile_image,
 
-        # 🔥 stats
+        # Stats
         "total_orders": total_orders,
         "avg_rating": avg_rating,
 
-        # 📅 date
-        "join_date": current_user.created_at.strftime("%d %b %Y")
+        # Date
+        "join_date": (
+            current_user.created_at.strftime("%d %b %Y")
+            if current_user.created_at
+            else None
+        ),
     }

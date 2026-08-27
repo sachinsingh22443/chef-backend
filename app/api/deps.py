@@ -19,32 +19,45 @@ def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
+    # =====================================================
+    # VERIFY ACCESS TOKEN
+    # =====================================================
+
     payload = verify_token(token)
+
     user_id = payload.get("sub")
 
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
+        )
+
+    # =====================================================
+    # FETCH CURRENT USER
+    #
+    # Keep this DB-backed because is_active is security
+    # sensitive and should not rely on stale Redis data.
+    # =====================================================
+
     user = (
-      db.query(User)
-      .filter(User.id == user_id)
-      .limit(1)
-      .first()
+        db.query(User)
+        .filter(
+            User.id == user_id,
+            User.is_active == True,
+        )
+        .limit(1)
+        .first()
     )
 
+    # =====================================================
+    # USER NOT FOUND / INACTIVE
+    # =====================================================
+
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    if not user.is_active:
         raise HTTPException(
-          status_code=403,
-          detail="Account is inactive"
+            status_code=403,
+            detail="User not found or account is inactive"
         )
 
     return user
-
-
-def require_role(roles: list):
-    def checker(user = Depends(get_current_user)):
-        if user.role not in roles:
-            raise HTTPException(status_code=403, detail="Access denied")
-        return user
-    return checker
-
