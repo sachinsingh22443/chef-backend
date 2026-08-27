@@ -1795,6 +1795,10 @@ def get_customer_subscription_menu_cycle(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # =====================================================
+    # CACHE
+    # =====================================================
+
     cache_key = (
         f"subscription:menu-cycle:"
         f"{subscription_id}:"
@@ -1809,6 +1813,12 @@ def get_customer_subscription_menu_cycle(
             cache_key
         )
         return cached
+
+    logger.info(
+        "🔥 Menu Cycle Cache MISS: %s",
+        cache_key
+    )
+
     # =====================================================
     # 1. FIND CUSTOMER SUBSCRIPTION
     # =====================================================
@@ -1848,13 +1858,27 @@ def get_customer_subscription_menu_cycle(
         )
 
     # =====================================================
-    # 3. GET CHEF'S SAVED 30-DAY MENU MAPPING
+    # 3. GET 30-DAY MENU CYCLE + MENU
+    #
+    # IMPORTANT:
+    # Previous code was doing one Menu query
+    # for every cycle row.
+    #
+    # Now we fetch Cycle + Menu together.
     # =====================================================
 
-    cycle_rows = (
-        db.query(SubscriptionPlanMenuCycle)
+    rows = (
+        db.query(
+            SubscriptionPlanMenuCycle,
+            Menu,
+        )
+        .join(
+            Menu,
+            Menu.id == SubscriptionPlanMenuCycle.menu_id,
+        )
         .filter(
             SubscriptionPlanMenuCycle.plan_id == plan.id,
+            Menu.chef_id == subscription.chef_id,
         )
         .order_by(
             SubscriptionPlanMenuCycle.day_number.asc(),
@@ -1864,10 +1888,8 @@ def get_customer_subscription_menu_cycle(
     )
 
     # =====================================================
-    # 4. RETURN EXACT MENU FOR EACH DAY
+    # 4. MEAL ORDER
     # =====================================================
-
-    result = []
 
     meal_order = {
         "breakfast": 1,
@@ -1875,37 +1897,38 @@ def get_customer_subscription_menu_cycle(
         "dinner": 3,
     }
 
-    cycle_rows.sort(
-        key=lambda row: (
-            row.day_number,
+    # =====================================================
+    # 5. SORT
+    # =====================================================
+
+    rows.sort(
+        key=lambda item: (
+            item[0].day_number,
             meal_order.get(
-                row.meal_type,
-                99
+                item[0].meal_type,
+                99,
             ),
         )
     )
 
-    for row in cycle_rows:
+    # =====================================================
+    # 6. BUILD RESPONSE
+    # =====================================================
 
-        menu = (
-            db.query(Menu)
-            .filter(
-                Menu.id == row.menu_id,
-                Menu.chef_id == subscription.chef_id,
-            )
-            .first()
-        )
+    result = []
+
+    for cycle_row, menu in rows:
 
         result.append({
-            "id": str(row.id),
+            "id": str(cycle_row.id),
 
-            "day_number": row.day_number,
+            "day_number": cycle_row.day_number,
 
-            "meal_type": row.meal_type,
+            "meal_type": cycle_row.meal_type,
 
             "menu_id": (
-                str(row.menu_id)
-                if row.menu_id
+                str(cycle_row.menu_id)
+                if cycle_row.menu_id
                 else None
             ),
 
@@ -1934,10 +1957,20 @@ def get_customer_subscription_menu_cycle(
                 else None
             ),
         })
+
+    # =====================================================
+    # 7. CACHE
+    # =====================================================
+
     set_cache(
         cache_key,
         result,
-        ttl=300
+        ttl=300,
+    )
+
+    logger.info(
+        "💾 Menu Cycle Cached: %s",
+        cache_key
     )
 
     return result
