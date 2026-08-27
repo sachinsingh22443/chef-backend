@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from app.core.cache import get_cache, set_cache
 
 from app.api.deps import get_current_user, get_db
 from app.models.order import Order
@@ -12,18 +13,29 @@ router = APIRouter()
 @router.get("/me")
 def get_profile(
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
     """
     CUSTOMER / CHEF PROFILE
 
-    Optimized:
-    - Reuses authenticated user from get_current_user()
-    - Avoids unnecessary profile relationship query for customers
-    - Keeps order count dynamic
-    - Keeps chef rating dynamic
-    - Response structure remains unchanged
+    Production optimized:
+    - User-specific Redis cache
+    - Cache HIT avoids profile/order/rating DB queries
+    - Customer order count remains dynamic after cache expiry
+    - Chef rating remains dynamic after cache expiry
+    - Existing response structure preserved
     """
+
+    # =====================================================
+    # REDIS CACHE
+    # =====================================================
+
+    cache_key = f"profile:v1:user:{current_user.id}"
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        return cached
 
     # =====================================================
     # CHEF PROFILE
@@ -39,6 +51,7 @@ def get_profile(
     # =====================================================
 
     if current_user.role == "chef":
+
         total_orders = (
             db.query(func.count(Order.id))
             .filter(
@@ -50,6 +63,7 @@ def get_profile(
         )
 
     else:
+
         total_orders = (
             db.query(func.count(Order.id))
             .filter(
@@ -67,10 +81,11 @@ def get_profile(
     avg_rating = 0
 
     if current_user.role == "chef":
+
         avg_rating = (
             db.query(func.avg(Review.rating))
             .filter(
-                Review.chef_id == current_user.id
+                Review.chef_id == current_user.id,
             )
             .scalar()
             or 0
@@ -83,8 +98,11 @@ def get_profile(
     # =====================================================
 
     if chef and chef.profile_image:
+
         profile_image = chef.profile_image
+
     else:
+
         profile_image = getattr(
             current_user,
             "profile_image",
@@ -95,7 +113,7 @@ def get_profile(
     # RESPONSE
     # =====================================================
 
-    return {
+    response = {
         "id": str(current_user.id),
         "name": current_user.name,
         "email": current_user.email,
@@ -110,14 +128,26 @@ def get_profile(
         # Profile image
         "profile_image": profile_image,
 
-        # Stats
+        # Statistics
         "total_orders": total_orders,
         "avg_rating": avg_rating,
 
-        # Date
+        # Join date
         "join_date": (
             current_user.created_at.strftime("%d %b %Y")
             if current_user.created_at
             else None
         ),
     }
+
+    # =====================================================
+    # SAVE TO REDIS
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        response,
+        ttl=120,
+    )
+
+    return response
