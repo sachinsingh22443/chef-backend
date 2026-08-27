@@ -6,18 +6,24 @@ from app.db.session import SessionLocal
 from app.core.security import verify_token
 from app.models.user import User
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/auth/login"
+)
+
 
 def get_db():
     db = SessionLocal()
+
     try:
         yield db
     finally:
         db.close()
 
+
 def get_current_user(
     token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     # =====================================================
     # VERIFY ACCESS TOKEN
@@ -30,14 +36,11 @@ def get_current_user(
     if not user_id:
         raise HTTPException(
             status_code=401,
-            detail="Invalid authentication token"
+            detail="Invalid authentication token",
         )
 
     # =====================================================
     # FETCH CURRENT USER
-    #
-    # Keep this DB-backed because is_active is security
-    # sensitive and should not rely on stale Redis data.
     # =====================================================
 
     user = (
@@ -57,7 +60,26 @@ def get_current_user(
     if not user:
         raise HTTPException(
             status_code=403,
-            detail="User not found or account is inactive"
+            detail="User not found or account is inactive",
         )
 
     return user
+
+
+def require_role(roles: list):
+    """
+    Restrict endpoint access based on user role.
+    """
+
+    def checker(
+        user=Depends(get_current_user),
+    ):
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied",
+            )
+
+        return user
+
+    return checker
