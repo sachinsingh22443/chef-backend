@@ -24,6 +24,7 @@ from app.schemas.subscription import SubscriptionCreate
 from app.schemas.subscription_plan import SubscriptionPlanOut
 from datetime import date, time, timedelta
 from zoneinfo import ZoneInfo
+IST = ZoneInfo("Asia/Kolkata")
 from app.models.user import User
 from math import radians, cos, sin, asin, sqrt
 from fastapi import Query
