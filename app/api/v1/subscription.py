@@ -104,20 +104,22 @@ def create_meal_schedules(
     - Subscription gets ₹10 discount per meal.
     - Breakfast is included only when enabled.
     - Only customer's selected delivery days are scheduled.
+    - Maximum subscription menu period = 30 days.
     """
 
     # =====================================================
     # 1. MEALS
     # =====================================================
 
-    meals = {
+    # Fixed order so that meals are processed consistently
+    meals = [
         "lunch",
         "dinner",
-    }
+    ]
 
     # Breakfast only if customer selected it
     if subscription.breakfast_enabled:
-        meals.add("breakfast")
+        meals.insert(0, "breakfast")
 
     # =====================================================
     # 2. DELIVERY DAYS
@@ -139,23 +141,33 @@ def create_meal_schedules(
         )
 
     # =====================================================
-    # 4. SUBSCRIPTION DATE RANGE
+    # 4. SUBSCRIPTION START DATE
     # =====================================================
 
     start_date = (
         subscription.start_date.date()
-        if isinstance(subscription.start_date, datetime)
+        if isinstance(
+            subscription.start_date,
+            datetime,
+        )
         else subscription.start_date
     )
 
+    # =====================================================
+    # 5. SUBSCRIPTION END DATE
+    # =====================================================
+
     end_date = (
         subscription.end_date.date()
-        if isinstance(subscription.end_date, datetime)
+        if isinstance(
+            subscription.end_date,
+            datetime,
+        )
         else subscription.end_date
     )
 
     # =====================================================
-    # 5. VALIDATE DATE RANGE
+    # 6. VALIDATE DATE RANGE
     # =====================================================
 
     if end_date < start_date:
@@ -165,31 +177,38 @@ def create_meal_schedules(
         )
 
     # =====================================================
-    # 6. MAXIMUM 30 DAYS
+    # 7. MAXIMUM 30 DAYS
     # =====================================================
 
-    max_end_date = start_date + timedelta(days=29)
+    max_end_date = (
+        start_date +
+        timedelta(days=29)
+    )
 
     if end_date > max_end_date:
         end_date = max_end_date
 
     # =====================================================
-    # 7. LOOP THROUGH EACH DATE
+    # 8. LOOP THROUGH SUBSCRIPTION DATES
     # =====================================================
 
     current_date = start_date
 
     while current_date <= end_date:
 
-        # -------------------------------------------------
+        # =================================================
         # GET WEEKDAY
-        # -------------------------------------------------
+        # =================================================
 
-        weekday = current_date.strftime("%a").lower()
+        weekday = (
+            current_date
+            .strftime("%a")
+            .lower()
+        )
 
-        # -------------------------------------------------
-        # ONLY SELECTED DELIVERY DAYS
-        # -------------------------------------------------
+        # =================================================
+        # ONLY CUSTOMER SELECTED DELIVERY DAYS
+        # =================================================
 
         if weekday in delivery_days:
 
@@ -236,12 +255,13 @@ def create_meal_schedules(
                         status_code=400,
                         detail=(
                             f"No {meal_type} normal menu "
-                            f"available for {current_date}"
+                            f"available for "
+                            f"{current_date}"
                         ),
                     )
 
                 # =========================================
-                # VERIFY CHEF
+                # VERIFY MENU BELONGS TO SAME CHEF
                 # =========================================
 
                 if menu.chef_id != subscription.chef_id:
@@ -257,7 +277,9 @@ def create_meal_schedules(
                 # CUTOFF TIME
                 # =========================================
 
-                cutoff_time = MEAL_CUTOFF_TIMES[meal_type]
+                cutoff_time = (
+                    MEAL_CUTOFF_TIMES[meal_type]
+                )
 
                 cutoff_at = datetime.combine(
                     current_date,
@@ -276,14 +298,14 @@ def create_meal_schedules(
                 # =========================================
                 # SUBSCRIPTION DISCOUNT
                 #
-                # Normal menu ₹100
-                # Subscription price ₹90
+                # Normal Menu ₹100
+                # Subscription ₹90
                 #
-                # Normal menu ₹90
-                # Subscription price ₹80
+                # Normal Menu ₹90
+                # Subscription ₹80
                 #
-                # Normal menu ₹70
-                # Subscription price ₹60
+                # Normal Menu ₹120
+                # Subscription ₹110
                 # =========================================
 
                 meal_price = max(
@@ -292,25 +314,28 @@ def create_meal_schedules(
                 )
 
                 # =========================================
-                # CREATE SCHEDULE
+                # CREATE SUBSCRIPTION MEAL SCHEDULE
                 # =========================================
 
                 schedule = SubscriptionMealSchedule(
                     subscription_id=subscription.id,
 
-                    # IMPORTANT:
-                    # Actual NORMAL MENU ID
+                    # Actual Normal Menu ID
                     menu_id=menu.id,
 
+                    # Exact date
                     date=current_date,
 
+                    # breakfast / lunch / dinner
                     meal_type=meal_type,
 
-                    # Subscription price
+                    # Normal Menu price - ₹10
                     meal_price=meal_price,
 
+                    # Default state
                     status="on",
 
+                    # Subscription cutoff
                     cutoff_at=cutoff_at,
                 )
 
