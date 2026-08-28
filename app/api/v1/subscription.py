@@ -2097,9 +2097,11 @@ async def turn_meal_off(
     # CALCULATE WALLET CREDIT
     # -----------------------------------------------------
 
-    amount = get_meal_wallet_amount(
-     meal=meal,
-    )
+    # -----------------------------------------------------
+# CALCULATE WALLET CREDIT
+# -----------------------------------------------------
+
+    amount = float(meal.meal_price or 0)
 
     try:
         # -------------------------------------------------
@@ -2340,9 +2342,11 @@ async def turn_meal_on(
     # CALCULATE WALLET DEBIT
     # -----------------------------------------------------
 
-    amount = get_meal_wallet_amount(
-     meal=meal,
-    )
+    # -----------------------------------------------------
+# CALCULATE WALLET DEBIT
+# -----------------------------------------------------
+
+    amount = float(meal.meal_price or 0)
 
     try:
         # -------------------------------------------------
