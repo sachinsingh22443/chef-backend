@@ -224,17 +224,7 @@ def create_meal_schedules(
                 # PRICE
                 # =============================================
 
-                if meal_type == "breakfast":
-                    meal_price = plan.breakfast_price or 0.0
-
-                elif meal_type == "lunch":
-                    meal_price = plan.lunch_price or 0.0
-
-                elif meal_type == "dinner":
-                    meal_price = plan.dinner_price or 0.0
-
-                else:
-                    meal_price = 0.0
+                meal_price = float(menu.price or 0.0)
 
                 # =============================================
                 # CREATE SCHEDULE
