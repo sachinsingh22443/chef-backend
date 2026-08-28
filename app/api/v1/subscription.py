@@ -84,15 +84,30 @@ def create_meal_schedules(
     plan: SubscriptionPlan,
 ):
     """
-    Create meal schedules using the subscription plan's
-    30-day menu cycle.
+    Create subscription meal schedules from the NORMAL MENU.
 
-    Existing Menu records are reused.
-    No new Menu is created.
+    Flow:
+        Subscription
+            ↓
+        Each subscription date
+            ↓
+        get_menu_for_day()
+            ↓
+        Normal Menu
+            ↓
+        SubscriptionMealSchedule
+
+    Rules:
+    - Normal Menu is the source of truth.
+    - Existing Menu records are reused.
+    - No new Menu is created.
+    - Subscription gets ₹10 discount per meal.
+    - Breakfast is included only when enabled.
+    - Only customer's selected delivery days are scheduled.
     """
 
     # =====================================================
-    # MEALS
+    # 1. MEALS
     # =====================================================
 
     meals = {
@@ -100,12 +115,12 @@ def create_meal_schedules(
         "dinner",
     }
 
-    # Breakfast only if enabled
+    # Breakfast only if customer selected it
     if subscription.breakfast_enabled:
         meals.add("breakfast")
 
     # =====================================================
-    # DELIVERY DAYS
+    # 2. DELIVERY DAYS
     # =====================================================
 
     delivery_days = {
@@ -114,103 +129,133 @@ def create_meal_schedules(
     }
 
     # =====================================================
-    # DATE RANGE
+    # 3. VALIDATE DELIVERY DAYS
     # =====================================================
 
-    current_date = subscription.start_date.date()
-    end_date = subscription.end_date.date()
+    if not delivery_days:
+        raise HTTPException(
+            status_code=400,
+            detail="No delivery days configured for subscription",
+        )
 
     # =====================================================
-    # LOOP DATES
+    # 4. SUBSCRIPTION DATE RANGE
     # =====================================================
+
+    start_date = (
+        subscription.start_date.date()
+        if isinstance(subscription.start_date, datetime)
+        else subscription.start_date
+    )
+
+    end_date = (
+        subscription.end_date.date()
+        if isinstance(subscription.end_date, datetime)
+        else subscription.end_date
+    )
+
+    # =====================================================
+    # 5. VALIDATE DATE RANGE
+    # =====================================================
+
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid subscription date range",
+        )
+
+    # =====================================================
+    # 6. MAXIMUM 30 DAYS
+    # =====================================================
+
+    max_end_date = start_date + timedelta(days=29)
+
+    if end_date > max_end_date:
+        end_date = max_end_date
+
+    # =====================================================
+    # 7. LOOP THROUGH EACH DATE
+    # =====================================================
+
+    current_date = start_date
 
     while current_date <= end_date:
 
+        # -------------------------------------------------
+        # GET WEEKDAY
+        # -------------------------------------------------
+
         weekday = current_date.strftime("%a").lower()
 
-        # Only customer's selected delivery days
+        # -------------------------------------------------
+        # ONLY SELECTED DELIVERY DAYS
+        # -------------------------------------------------
+
         if weekday in delivery_days:
 
-            # =================================================
-            # CALCULATE SUBSCRIPTION DAY
-            # =================================================
+            # =============================================
+            # SUBSCRIPTION DAY NUMBER
+            # =============================================
 
             day_number = (
-                current_date
-                - subscription.start_date.date()
+                current_date - start_date
             ).days + 1
 
             if day_number < 1 or day_number > 30:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"Invalid subscription cycle day: "
+                        f"Invalid subscription day: "
                         f"{day_number}"
                     ),
                 )
 
-            # =================================================
-            # GET CYCLE MAPPINGS
-            # =================================================
-
-            cycle_rows = (
-                db.query(SubscriptionPlanMenuCycle)
-                .filter(
-                    SubscriptionPlanMenuCycle.plan_id == plan.id,
-                    SubscriptionPlanMenuCycle.day_number == day_number,
-                    SubscriptionPlanMenuCycle.meal_type.in_(meals),
-                )
-                .all()
-            )
-
-            cycle_map = {
-                row.meal_type: row
-                for row in cycle_rows
-            }
-
-            # =================================================
+            # =============================================
             # CREATE EACH MEAL
-            # =================================================
+            # =============================================
 
             for meal_type in meals:
 
-                cycle_row = cycle_map.get(meal_type)
+                # =========================================
+                # GET NORMAL MENU
+                # =========================================
 
-                if not cycle_row:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"No {meal_type} menu configured "
-                            f"for subscription Day {day_number}"
-                        ),
-                    )
-
-                # =============================================
-                # VERIFY MENU
-                # =============================================
-
-                menu = (
-                    db.query(Menu)
-                    .filter(
-                        Menu.id == cycle_row.menu_id,
-                        Menu.chef_id == subscription.chef_id,
-                    )
-                    .first()
+                menu, source = get_menu_for_day(
+                    db=db,
+                    chef_id=subscription.chef_id,
+                    target_date=current_date,
+                    meal_type=meal_type,
                 )
+
+                # =========================================
+                # NORMAL MENU NOT FOUND
+                # =========================================
 
                 if not menu:
                     raise HTTPException(
                         status_code=400,
                         detail=(
-                            f"Menu not found for "
-                            f"Day {day_number} "
-                            f"{meal_type}"
+                            f"No {meal_type} normal menu "
+                            f"available for {current_date}"
                         ),
                     )
 
-                # =============================================
-                # CUTOFF
-                # =============================================
+                # =========================================
+                # VERIFY CHEF
+                # =========================================
+
+                if menu.chef_id != subscription.chef_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Invalid {meal_type} menu "
+                            f"for subscription"
+                        ),
+                    )
+
+                # =========================================
+                # CUTOFF TIME
+                # =========================================
 
                 cutoff_time = MEAL_CUTOFF_TIMES[meal_type]
 
@@ -220,27 +265,60 @@ def create_meal_schedules(
                     tzinfo=IST,
                 )
 
-                # =============================================
-                # PRICE
-                # =============================================
+                # =========================================
+                # NORMAL MENU PRICE
+                # =========================================
 
-                meal_price = max(float(menu.price or 0.0) - 10.0, 0.0)
+                normal_menu_price = float(
+                    menu.price or 0.0
+                )
 
-                # =============================================
+                # =========================================
+                # SUBSCRIPTION DISCOUNT
+                #
+                # Normal menu ₹100
+                # Subscription price ₹90
+                #
+                # Normal menu ₹90
+                # Subscription price ₹80
+                #
+                # Normal menu ₹70
+                # Subscription price ₹60
+                # =========================================
+
+                meal_price = max(
+                    normal_menu_price - 10.0,
+                    0.0,
+                )
+
+                # =========================================
                 # CREATE SCHEDULE
-                # =============================================
+                # =========================================
 
                 schedule = SubscriptionMealSchedule(
                     subscription_id=subscription.id,
+
+                    # IMPORTANT:
+                    # Actual NORMAL MENU ID
                     menu_id=menu.id,
+
                     date=current_date,
+
                     meal_type=meal_type,
+
+                    # Subscription price
                     meal_price=meal_price,
+
                     status="on",
+
                     cutoff_at=cutoff_at,
                 )
 
                 db.add(schedule)
+
+        # =================================================
+        # NEXT DATE
+        # =================================================
 
         current_date += timedelta(days=1)
 # =========================
@@ -1365,9 +1443,9 @@ def get_today_meals(
             ),
 
             "menu_price": (
-                menu.price
-                if menu
-                else None
+              max(float(menu.price or 0.0) - 10.0, 0.0)
+              if menu
+              else None
             ),
 
             "menu_category": (
@@ -1612,7 +1690,11 @@ def get_subscription_meals(
                     "id": str(menu.id),
                     "name": menu.name,
                     "description": menu.description,
-                    "price": menu.price,
+                    "price": (
+                       max(float(menu.price or 0.0) - 10.0, 0.0)
+                       if menu
+                       else None
+                    ),
                     "category": menu.category,
                     "food_type": menu.food_type,
 
@@ -1775,16 +1857,38 @@ def get_subscription_meals(
             detail="Unable to load subscription menu",
         )
         
+# =========================================================
+# GET CUSTOMER SUBSCRIPTION MENU CYCLE
+# =========================================================
+#
+# IMPORTANT:
+# Subscription menu is taken from SubscriptionMealSchedule.
+#
+# Flow:
+#
+# Normal Menu
+#     ↓
+# SubscriptionMealSchedule
+#     ↓
+# /subscriptions/{subscription_id}/menu-cycle
+#     ↓
+# Customer
+#
+# Rules:
+# - Do NOT use SubscriptionPlanMenuCycle
+# - Use exact menu saved for each subscription date
+# - Use existing Normal Menu record
+# - No new Menu is created
+# - Subscription price = Normal Menu price - ₹10
+# - Return actual subscription days
+# =========================================================
+
 @router.get("/{subscription_id}/menu-cycle")
 def get_customer_subscription_menu_cycle(
     subscription_id: UUID,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    # =====================================================
-    # CACHE
-    # =====================================================
-
     cache_key = (
         f"subscription:menu-cycle:"
         f"{subscription_id}:"
@@ -1800,166 +1904,247 @@ def get_customer_subscription_menu_cycle(
         )
         return cached
 
-    logger.info(
-        "🔥 Menu Cycle Cache MISS: %s",
-        cache_key
-    )
+    try:
 
-    # =====================================================
-    # 1. FIND CUSTOMER SUBSCRIPTION
-    # =====================================================
+        # =====================================================
+        # 1. FIND CUSTOMER SUBSCRIPTION
+        # =====================================================
 
-    subscription = (
-        db.query(Subscription)
-        .filter(
-            Subscription.id == subscription_id,
-            Subscription.user_id == user.id,
-            Subscription.status == "active",
+        subscription = (
+            db.query(Subscription)
+            .filter(
+                Subscription.id == subscription_id,
+                Subscription.user_id == user.id,
+                Subscription.status == "active",
+            )
+            .first()
         )
-        .first()
-    )
 
-    if not subscription:
+        if not subscription:
+            raise HTTPException(
+                status_code=404,
+                detail="Active subscription not found",
+            )
+
+        # =====================================================
+        # 2. VALIDATE DATES
+        # =====================================================
+
+        if (
+            not subscription.start_date
+            or not subscription.end_date
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Subscription dates are not configured",
+            )
+
+        if subscription.end_date < subscription.start_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid subscription date range",
+            )
+
+        # =====================================================
+        # 3. GET ACTUAL SUBSCRIPTION MEAL SCHEDULE
+        # =====================================================
+        #
+        # This is the important change.
+        #
+        # We DON'T read SubscriptionPlanMenuCycle anymore.
+        #
+        # SubscriptionMealSchedule already contains the
+        # exact menu_id assigned when subscription was created.
+        # =====================================================
+
+        schedules = (
+            db.query(SubscriptionMealSchedule)
+            .filter(
+                SubscriptionMealSchedule.subscription_id
+                == subscription.id,
+            )
+            .order_by(
+                SubscriptionMealSchedule.date.asc(),
+                SubscriptionMealSchedule.meal_type.asc(),
+            )
+            .all()
+        )
+
+        # =====================================================
+        # 4. EMPTY
+        # =====================================================
+
+        if not schedules:
+            return []
+
+        # =====================================================
+        # 5. MEAL ORDER
+        # =====================================================
+
+        meal_order = {
+            "breakfast": 1,
+            "lunch": 2,
+            "dinner": 3,
+        }
+
+        schedules.sort(
+            key=lambda row: (
+                row.date,
+                meal_order.get(
+                    row.meal_type,
+                    99
+                ),
+            )
+        )
+
+        # =====================================================
+        # 6. BUILD RESPONSE
+        # =====================================================
+
+        result = []
+
+        for schedule in schedules:
+
+            # -------------------------------------------------
+            # DAY NUMBER
+            # Start Date = Day 1
+            # -------------------------------------------------
+
+            day_number = (
+                schedule.date -
+                subscription.start_date
+            ).days + 1
+
+            # -------------------------------------------------
+            # GET EXACT NORMAL MENU
+            # -------------------------------------------------
+
+            menu = None
+
+            if schedule.menu_id:
+
+                menu = (
+                    db.query(Menu)
+                    .filter(
+                        Menu.id == schedule.menu_id,
+                        Menu.chef_id == subscription.chef_id,
+                    )
+                    .first()
+                )
+
+            # -------------------------------------------------
+            # NORMAL MENU PRICE
+            # -------------------------------------------------
+
+            normal_price = (
+                float(menu.price)
+                if menu and menu.price is not None
+                else 0
+            )
+
+            # -------------------------------------------------
+            # SUBSCRIPTION DISCOUNT
+            # ₹10 OFF
+            # -------------------------------------------------
+
+            subscription_price = max(
+                normal_price - 10,
+                0
+            )
+
+            # -------------------------------------------------
+            # IMAGE
+            # -------------------------------------------------
+
+            menu_image = None
+
+            if menu and menu.image_urls:
+                menu_image = menu.image_urls[0]
+
+            # -------------------------------------------------
+            # RESULT
+            # -------------------------------------------------
+
+            result.append({
+                "id": str(schedule.id),
+
+                "day_number": day_number,
+
+                "meal_type": schedule.meal_type,
+
+                "menu_id": (
+                    str(menu.id)
+                    if menu
+                    else None
+                ),
+
+                "menu_name": (
+                    menu.name
+                    if menu
+                    else None
+                ),
+
+                "menu_description": (
+                    menu.description
+                    if menu
+                    else None
+                ),
+
+                # 🔥 CUSTOMER SEES ₹10 DISCOUNTED PRICE
+                "menu_price": subscription_price,
+
+                # Optional original price
+                "normal_menu_price": normal_price,
+
+                "subscription_price": subscription_price,
+
+                "date": schedule.date,
+
+                "menu_image": menu_image,
+
+                "chef_id": str(
+                    subscription.chef_id
+                ),
+
+                "chef_name": None,
+            })
+
+        # =====================================================
+        # 7. CACHE
+        # =====================================================
+
+        set_cache(
+            cache_key,
+            result,
+            ttl=300
+        )
+
+        logger.info(
+            "✅ Subscription Menu Cycle Loaded: "
+            "subscription=%s items=%s",
+            subscription_id,
+            len(result),
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        logger.exception(
+            "❌ Failed to load subscription menu cycle: "
+            "subscription_id=%s user_id=%s error=%s",
+            subscription_id,
+            getattr(user, "id", None),
+            str(e),
+        )
+
         raise HTTPException(
-            status_code=404,
-            detail="Active subscription not found",
+            status_code=500,
+            detail="Unable to load subscription menu",
         )
-
-    # =====================================================
-    # 2. FIND SUBSCRIPTION PLAN
-    # =====================================================
-
-    plan = (
-        db.query(SubscriptionPlan)
-        .filter(
-            SubscriptionPlan.id == subscription.plan_id,
-        )
-        .first()
-    )
-
-    if not plan:
-        raise HTTPException(
-            status_code=404,
-            detail="Subscription plan not found",
-        )
-
-    # =====================================================
-    # 3. GET 30-DAY MENU CYCLE + MENU
-    #
-    # IMPORTANT:
-    # Previous code was doing one Menu query
-    # for every cycle row.
-    #
-    # Now we fetch Cycle + Menu together.
-    # =====================================================
-
-    rows = (
-        db.query(
-            SubscriptionPlanMenuCycle,
-            Menu,
-        )
-        .join(
-            Menu,
-            Menu.id == SubscriptionPlanMenuCycle.menu_id,
-        )
-        .filter(
-            SubscriptionPlanMenuCycle.plan_id == plan.id,
-            Menu.chef_id == subscription.chef_id,
-        )
-        .order_by(
-            SubscriptionPlanMenuCycle.day_number.asc(),
-            SubscriptionPlanMenuCycle.meal_type.asc(),
-        )
-        .all()
-    )
-
-    # =====================================================
-    # 4. MEAL ORDER
-    # =====================================================
-
-    meal_order = {
-        "breakfast": 1,
-        "lunch": 2,
-        "dinner": 3,
-    }
-
-    # =====================================================
-    # 5. SORT
-    # =====================================================
-
-    rows.sort(
-        key=lambda item: (
-            item[0].day_number,
-            meal_order.get(
-                item[0].meal_type,
-                99,
-            ),
-        )
-    )
-
-    # =====================================================
-    # 6. BUILD RESPONSE
-    # =====================================================
-
-    result = []
-
-    for cycle_row, menu in rows:
-
-        result.append({
-            "id": str(cycle_row.id),
-
-            "day_number": cycle_row.day_number,
-
-            "meal_type": cycle_row.meal_type,
-
-            "menu_id": (
-                str(cycle_row.menu_id)
-                if cycle_row.menu_id
-                else None
-            ),
-
-            "menu_name": (
-                menu.name
-                if menu
-                else None
-            ),
-
-            "menu_description": (
-                menu.description
-                if menu
-                else None
-            ),
-
-            "menu_price": (
-                menu.price
-                if menu
-                else None
-            ),
-
-            "menu_image": (
-                menu.image_urls[0]
-                if menu
-                and menu.image_urls
-                else None
-            ),
-        })
-
-    # =====================================================
-    # 7. CACHE
-    # =====================================================
-
-    set_cache(
-        cache_key,
-        result,
-        ttl=300,
-    )
-
-    logger.info(
-        "💾 Menu Cycle Cached: %s",
-        cache_key
-    )
-
-    return result
 
 # =========================================================
 # TURN MEAL OFF
