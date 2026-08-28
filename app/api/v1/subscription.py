@@ -224,7 +224,7 @@ def create_meal_schedules(
                 # PRICE
                 # =============================================
 
-                meal_price = float(menu.price or 0.0)
+                meal_price = max(float(menu.price or 0.0) - 10.0, 0.0)
 
                 # =============================================
                 # CREATE SCHEDULE
