@@ -906,6 +906,24 @@ def create_subscription(
         delete_cache(
             f"subscription:chef:{menu.chef_id}"
         )
+        
+        delete_cache(
+            f"subscription:today:{sub.id}:{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:menu-cycle:{sub.id}:{user.id}"
+        )
+ 
+        delete_cache(
+            f"subscription:meals:{sub.id}:{user.id}:False"
+        )
+        
+        delete_cache(
+            f"subscription:meals:{sub.id}:{user.id}:True"
+        )
+        
+        
 
     except Exception:
         db.rollback()
@@ -1337,18 +1355,29 @@ def my_subscriptions(
 # GET TODAY'S MEAL SCHEDULE WITH MENU DETAILS
 # =========================================================
 
+# =========================================================
+# GET TODAY'S MEAL SCHEDULE WITH MENU DETAILS
+# =========================================================
+
 @router.get("/{subscription_id}/meals/today")
 def get_today_meals(
     subscription_id: UUID,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    
+    # =====================================================
+    # CACHE KEY
+    # =====================================================
+
     cache_key = (
         f"subscription:today:"
         f"{subscription_id}:"
         f"{user.id}"
     )
+
+    # =====================================================
+    # CACHE HIT
+    # =====================================================
 
     cached = get_cache(cache_key)
 
@@ -1385,7 +1414,7 @@ def get_today_meals(
     today = datetime.now(IST).date()
 
     # =====================================================
-    # GET TODAY'S MEAL SCHEDULES
+    # GET TODAY'S SUBSCRIPTION MEAL SCHEDULES
     # =====================================================
 
     meals = (
@@ -1411,21 +1440,65 @@ def get_today_meals(
 
     for meal in meals:
 
-        menu, source = get_menu_for_day(
-           db=db,
-           chef_id=subscription.chef_id,
-           target_date=today,
-           meal_type=meal.meal_type,
+        # =================================================
+        # IMPORTANT:
+        # USE THE EXACT MENU SAVED IN SCHEDULE
+        # DO NOT CALL get_menu_for_day() HERE
+        # =================================================
+
+        menu = None
+
+        if meal.menu_id:
+
+            menu = (
+                db.query(Menu)
+                .filter(
+                    Menu.id == meal.menu_id,
+                    Menu.chef_id == subscription.chef_id,
+                )
+                .first()
+            )
+
+        # =================================================
+        # NORMAL MENU PRICE
+        # =================================================
+
+        normal_menu_price = (
+            float(menu.price)
+            if menu and menu.price is not None
+            else 0.0
         )
 
         # =================================================
-        # MENU DETAILS
+        # SUBSCRIPTION PRICE
+        #
+        # Normal Menu ₹100 → Subscription ₹90
+        # Normal Menu ₹90  → Subscription ₹80
+        # Normal Menu ₹70  → Subscription ₹60
+        # =================================================
+
+        subscription_price = max(
+            normal_menu_price - 10.0,
+            0.0,
+        )
+
+        # =================================================
+        # MENU IMAGE
+        # =================================================
+
+        menu_image = None
+
+        if menu and menu.image_urls:
+            menu_image = menu.image_urls[0]
+
+        # =================================================
+        # RESPONSE ITEM
         # =================================================
 
         result.append({
 
             # ---------------------------------------------
-            # MEAL
+            # SCHEDULE
             # ---------------------------------------------
 
             "id": str(meal.id),
@@ -1445,13 +1518,17 @@ def get_today_meals(
             "cutoff_at": meal.cutoff_at,
 
             # ---------------------------------------------
-            # EXACT MENU
+            # EXACT NORMAL MENU
             # ---------------------------------------------
 
             "menu_id": (
                 str(menu.id)
                 if menu
-                else None
+                else (
+                    str(meal.menu_id)
+                    if meal.menu_id
+                    else None
+                )
             ),
 
             "menu_name": (
@@ -1466,11 +1543,22 @@ def get_today_meals(
                 else None
             ),
 
-            "menu_price": (
-              max(float(menu.price or 0.0) - 10.0, 0.0)
-              if menu
-              else None
-            ),
+            # ---------------------------------------------
+            # PRICE
+            # ---------------------------------------------
+
+            # Customer sees subscription price
+            "menu_price": subscription_price,
+
+            # Original normal menu price
+            "normal_menu_price": normal_menu_price,
+
+            # Subscription price
+            "subscription_price": subscription_price,
+
+            # ---------------------------------------------
+            # MENU DETAILS
+            # ---------------------------------------------
 
             "menu_category": (
                 menu.category
@@ -1517,7 +1605,7 @@ def get_today_meals(
             # ---------------------------------------------
 
             "ingredients": (
-                menu.ingredients
+                menu.ingredients or []
                 if menu
                 else []
             ),
@@ -1527,26 +1615,40 @@ def get_today_meals(
             # ---------------------------------------------
 
             "image_urls": (
-                menu.image_urls
+                menu.image_urls or []
                 if menu
                 else []
             ),
 
-            "menu_image": (
-                menu.image_urls[0]
-                if menu
-                and menu.image_urls
-                else None
-            ),
+            "menu_image": menu_image,
         })
+
+    # =====================================================
+    # CACHE RESULT
+    # =====================================================
+
     set_cache(
         cache_key,
         result,
-        ttl=30
+        ttl=30,
     )
 
-    return result
+    # =====================================================
+    # LOG
+    # =====================================================
 
+    logger.info(
+        "✅ Today's Meals Loaded: "
+        "subscription=%s items=%s",
+        subscription_id,
+        len(result),
+    )
+
+    # =====================================================
+    # RETURN
+    # =====================================================
+
+    return result
 
 # =========================================================
 # GET SUBSCRIPTION MENU
@@ -1827,25 +1929,14 @@ def get_subscription_meals(
         # 9. FINAL RESPONSE
         # =====================================================
 
-        return {
+        response = {
             "success": True,
-
-            "subscription_id": str(
-                subscription.id
-            ),
-
+            "subscription_id": str(subscription.id),
             "start_date": subscription.start_date,
-
             "end_date": subscription.end_date,
-
-            "breakfast_enabled": bool(
-                subscription.breakfast_enabled
-            ),
-
+            "breakfast_enabled": bool(subscription.breakfast_enabled),
             "view_all": view_all,
-
             "total_days": len(result_days),
-
             "days": result_days,
         }
         
@@ -1854,6 +1945,8 @@ def get_subscription_meals(
             response,
             ttl=60
         )
+        
+        return response
 
     # =========================================================
     # FASTAPI HTTP ERRORS
@@ -3413,7 +3506,8 @@ def verify_breakfast_payment(
                     menu, source = get_menu_for_day(
                         db=db,
                         chef_id=subscription.chef_id,
-                        target_date=current_date,
+                        target_date=today,
+                        meal_type=meal.meal_type,
                     )
 
                     # =========================================
