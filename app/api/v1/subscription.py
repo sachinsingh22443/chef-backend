@@ -25,6 +25,11 @@ from app.schemas.subscription_plan import SubscriptionPlanOut
 from datetime import date, time, timedelta
 from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
+MEAL_CUTOFF_TIMES = {
+    "breakfast": time(8, 0),
+    "lunch": time(11, 0),
+    "dinner": time(18, 0),
+}
 from app.models.user import User
 from math import radians, cos, sin, asin, sqrt
 from fastapi import Query
