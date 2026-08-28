@@ -1309,22 +1309,12 @@ def get_today_meals(
 
     for meal in meals:
 
-        menu = None
-
-        # =================================================
-        # GET EXACT MENU SAVED FOR THIS DATE
-        # =================================================
-
-        if meal.menu_id:
-
-            menu = (
-                db.query(Menu)
-                .filter(
-                    Menu.id == meal.menu_id,
-                    Menu.chef_id == subscription.chef_id,
-                )
-                .first()
-            )
+        menu, source = get_menu_for_day(
+           db=db,
+           chef_id=subscription.chef_id,
+           target_date=today,
+           meal_type=meal.meal_type,
+        )
 
         # =================================================
         # MENU DETAILS
