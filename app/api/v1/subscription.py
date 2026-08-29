@@ -2297,6 +2297,10 @@ def get_subscription_meals(
 # - Return actual subscription days
 # =========================================================
 
+# =========================================================
+# GET CUSTOMER SUBSCRIPTION MENU CYCLE
+# =========================================================
+
 @router.get("/{subscription_id}/menu-cycle")
 def get_customer_subscription_menu_cycle(
     subscription_id: UUID,
@@ -2304,55 +2308,68 @@ def get_customer_subscription_menu_cycle(
     user=Depends(get_current_user),
 ):
     """
-    Get customer's subscription menu cycle.
+    CUSTOMER SUBSCRIPTION MENU
 
     IMPORTANT:
+    Normal Menu is the SINGLE SOURCE OF TRUTH.
 
-    Normal Menu
-        ↓
-    SubscriptionMealSchedule
-        ↓
-    Existing Menu
-        ↓
-    Customer
+    Flow:
 
-    Rules:
+        Subscription Date
+                +
+        Meal Type
+                ↓
+        get_menu_for_day()
+                ↓
+        Normal Menu
+                ↓
+        ₹10 subscription discount
+                ↓
+        Customer Subscription Menu
+
+    IMPORTANT:
+    - Do NOT use old schedule.menu_id for display.
     - Do NOT use SubscriptionPlanMenuCycle.
-    - Use SubscriptionMealSchedule.
-    - Use exact menu saved for subscription.
-    - No new Menu is created.
+    - Resolve menu again using date + meal_type.
+    - Normal Menu price is NEVER modified.
     - Subscription price = Normal Menu price - ₹10.
-    - Start date = Day 1.
+    - Existing SubscriptionMealSchedule is used only for:
+        status
+        date
+        meal_type
+        cutoff
+        schedule id
     """
 
     # =====================================================
-    # CACHE KEY
+    # CACHE
     # =====================================================
 
     cache_key = (
-        f"subscription:menu-cycle:"
+        f"subscription:menu-cycle:v2:"
         f"{subscription_id}:"
         f"{user.id}"
     )
-
-    # =====================================================
-    # CACHE HIT
-    # =====================================================
 
     cached = get_cache(cache_key)
 
     if cached is not None:
         logger.info(
-            "✅ Menu Cycle Cache HIT: %s",
-            cache_key
+            "✅ Subscription Menu Cycle Cache HIT: %s",
+            cache_key,
         )
         return cached
 
+    logger.info(
+        "🔥 Subscription Menu Cycle Cache MISS: %s",
+        cache_key,
+    )
+
     try:
 
-        # =====================================================
+        # =================================================
         # 1. FIND CUSTOMER SUBSCRIPTION
-        # =====================================================
+        # =================================================
 
         subscription = (
             db.query(Subscription)
@@ -2370,9 +2387,9 @@ def get_customer_subscription_menu_cycle(
                 detail="Active subscription not found",
             )
 
-        # =====================================================
+        # =================================================
         # 2. VALIDATE SUBSCRIPTION DATES
-        # =====================================================
+        # =================================================
 
         if (
             not subscription.start_date
@@ -2383,16 +2400,9 @@ def get_customer_subscription_menu_cycle(
                 detail="Subscription dates are not configured",
             )
 
-        # =====================================================
-        # IMPORTANT:
-        # Normalize BOTH dates to datetime.date
-        #
-        # This prevents:
-        #
-        # datetime.date - datetime.datetime
-        #
-        # TypeError
-        # =====================================================
+        # =================================================
+        # 3. NORMALIZE START DATE
+        # =================================================
 
         subscription_start_date = (
             subscription.start_date.date()
@@ -2403,6 +2413,10 @@ def get_customer_subscription_menu_cycle(
             else subscription.start_date
         )
 
+        # =================================================
+        # 4. NORMALIZE END DATE
+        # =================================================
+
         subscription_end_date = (
             subscription.end_date.date()
             if isinstance(
@@ -2412,9 +2426,9 @@ def get_customer_subscription_menu_cycle(
             else subscription.end_date
         )
 
-        # =====================================================
-        # VALIDATE DATE RANGE
-        # =====================================================
+        # =================================================
+        # 5. VALIDATE DATE RANGE
+        # =================================================
 
         if subscription_end_date < subscription_start_date:
             raise HTTPException(
@@ -2422,9 +2436,18 @@ def get_customer_subscription_menu_cycle(
                 detail="Invalid subscription date range",
             )
 
-        # =====================================================
-        # 3. GET ACTUAL SUBSCRIPTION MEAL SCHEDULES
-        # =====================================================
+        # =================================================
+        # 6. GET SUBSCRIPTION MEAL SCHEDULES
+        #
+        # Schedule is used for:
+        # - date
+        # - meal_type
+        # - status
+        # - cutoff
+        #
+        # IMPORTANT:
+        # schedule.menu_id is NOT trusted for menu display.
+        # =================================================
 
         schedules = (
             db.query(SubscriptionMealSchedule)
@@ -2439,24 +2462,37 @@ def get_customer_subscription_menu_cycle(
             .all()
         )
 
-        # =====================================================
-        # 4. EMPTY
-        # =====================================================
+        # =================================================
+        # 7. EMPTY
+        # =================================================
 
         if not schedules:
-            response = []
+
+            response = {
+                "success": True,
+                "subscription_id": str(
+                    subscription.id
+                ),
+                "start_date": subscription_start_date,
+                "end_date": subscription_end_date,
+                "breakfast_enabled": bool(
+                    subscription.breakfast_enabled
+                ),
+                "total_days": 0,
+                "days": [],
+            }
 
             set_cache(
                 cache_key,
                 response,
-                ttl=300,
+                ttl=30,
             )
 
             return response
 
-        # =====================================================
-        # 5. MEAL ORDER
-        # =====================================================
+        # =================================================
+        # 8. MEAL ORDER
+        # =================================================
 
         meal_order = {
             "breakfast": 1,
@@ -2464,39 +2500,40 @@ def get_customer_subscription_menu_cycle(
             "dinner": 3,
         }
 
-        # =====================================================
-        # 6. SORT SCHEDULES
-        #
-        # Normalize date while sorting too.
-        # =====================================================
+        # =================================================
+        # 9. SORT SCHEDULES
+        # =================================================
 
         schedules.sort(
             key=lambda row: (
                 (
                     row.date.date()
-                    if isinstance(row.date, datetime)
+                    if isinstance(
+                        row.date,
+                        datetime,
+                    )
                     else row.date
                 ),
                 meal_order.get(
-                    row.meal_type,
+                    (
+                        row.meal_type or ""
+                    ).lower().strip(),
                     99,
                 ),
             )
         )
 
-        # =====================================================
-        # 7. BUILD RESPONSE
-        # =====================================================
+        # =================================================
+        # 10. GROUP BY DATE
+        # =================================================
 
-        result = []
+        grouped_days = {}
 
         for schedule in schedules:
 
-            # =================================================
-            # NORMALIZE SCHEDULE DATE
-            #
-            # IMPORTANT FIX
-            # =================================================
+            # ---------------------------------------------
+            # NORMALIZE DATE
+            # ---------------------------------------------
 
             schedule_date = (
                 schedule.date.date()
@@ -2507,57 +2544,55 @@ def get_customer_subscription_menu_cycle(
                 else schedule.date
             )
 
-            # =================================================
-            # DAY NUMBER
-            #
-            # Start Date = Day 1
-            #
-            # Example:
-            #
-            # Aug 17 = Day 1
-            # Aug 18 = Day 2
-            # Aug 19 = Day 3
-            #
-            # =================================================
+            # ---------------------------------------------
+            # IGNORE OUTSIDE SUBSCRIPTION RANGE
+            # ---------------------------------------------
 
-            day_number = (
-                schedule_date -
-                subscription_start_date
-            ).days + 1
-
-            # =================================================
-            # VALIDATE DAY NUMBER
-            # =================================================
-
-            if day_number < 1 or day_number > 30:
-                logger.warning(
-                    "Invalid subscription day number: "
-                    "subscription=%s schedule_date=%s "
-                    "start_date=%s day_number=%s",
-                    subscription.id,
-                    schedule_date,
-                    subscription_start_date,
-                    day_number,
-                )
-
+            if (
+                schedule_date
+                < subscription_start_date
+                or schedule_date
+                > subscription_end_date
+            ):
                 continue
 
+            # ---------------------------------------------
+            # CREATE DATE GROUP
+            # ---------------------------------------------
+
+            if schedule_date not in grouped_days:
+                grouped_days[schedule_date] = []
+
             # =================================================
-            # GET EXACT NORMAL MENU
+            # NORMALIZE MEAL TYPE
             # =================================================
 
-            menu = None
+            meal_type = (
+                schedule.meal_type or ""
+            ).lower().strip()
 
-            if schedule.menu_id:
+            # =================================================
+            # GET NORMAL MENU
+            #
+            # THIS IS THE IMPORTANT FIX
+            #
+            # NEVER use:
+            #
+            #     schedule.menu_id
+            #
+            # Instead:
+            #
+            #     date + meal_type
+            #
+            # → get_menu_for_day()
+            # =================================================
 
-                menu = (
-                    db.query(Menu)
-                    .filter(
-                        Menu.id == schedule.menu_id,
-                        Menu.chef_id == subscription.chef_id,
-                    )
-                    .first()
-                )
+            menu, source = get_menu_for_day(
+                db=db,
+                chef_id=subscription.chef_id,
+                target_date=schedule_date,
+                meal_type=meal_type,
+            )
 
             # =================================================
             # NORMAL MENU PRICE
@@ -2565,23 +2600,19 @@ def get_customer_subscription_menu_cycle(
 
             normal_price = (
                 float(menu.price)
-                if menu and menu.price is not None
+                if menu
+                and menu.price is not None
                 else 0.0
             )
 
             # =================================================
-            # SUBSCRIPTION DISCOUNT
+            # SUBSCRIPTION PRICE
             #
-            # NORMAL MENU ₹100
-            # SUBSCRIPTION ₹90
+            # NORMAL ₹100 → ₹90
+            # NORMAL ₹90  → ₹80
+            # NORMAL ₹70  → ₹60
             #
-            # NORMAL MENU ₹90
-            # SUBSCRIPTION ₹80
-            #
-            # NORMAL MENU ₹50
-            # SUBSCRIPTION ₹40
-            #
-            # Minimum ₹0
+            # NORMAL MENU PRICE IS NEVER CHANGED.
             # =================================================
 
             subscription_price = max(
@@ -2599,150 +2630,326 @@ def get_customer_subscription_menu_cycle(
                 menu_image = menu.image_urls[0]
 
             # =================================================
-            # RESULT
+            # MENU DATA
             # =================================================
 
-            result.append({
-                # ---------------------------------------------
-                # SCHEDULE
-                # ---------------------------------------------
+            menu_data = None
 
-                "id": str(schedule.id),
+            if menu:
 
-                "day_number": day_number,
+                menu_data = {
+                    # -----------------------------------------
+                    # BASIC
+                    # -----------------------------------------
 
-                "meal_type": schedule.meal_type,
+                    "id": str(menu.id),
 
-                "date": schedule_date,
+                    "name": menu.name,
 
-                "status": schedule.status,
+                    "description": menu.description,
 
-                "cutoff_at": schedule.cutoff_at,
+                    # -----------------------------------------
+                    # PRICE
+                    # -----------------------------------------
 
-                # ---------------------------------------------
-                # MENU
-                # ---------------------------------------------
+                    "price": subscription_price,
 
-                "menu_id": (
-                    str(menu.id)
-                    if menu
-                    else (
-                        str(schedule.menu_id)
-                        if schedule.menu_id
+                    "normal_price": normal_price,
+
+                    "subscription_price": subscription_price,
+
+                    # -----------------------------------------
+                    # CATEGORY
+                    # -----------------------------------------
+
+                    "category": menu.category,
+
+                    "food_type": menu.food_type,
+
+                    # -----------------------------------------
+                    # NUTRITION
+                    # -----------------------------------------
+
+                    "calories": menu.calories,
+
+                    "protein": menu.protein,
+
+                    "carbs": menu.carbs,
+
+                    "fats": menu.fats,
+
+                    # -----------------------------------------
+                    # INGREDIENTS
+                    # -----------------------------------------
+
+                    "ingredients": (
+                        menu.ingredients or []
+                    ),
+
+                    # -----------------------------------------
+                    # IMAGE
+                    # -----------------------------------------
+
+                    "image_urls": (
+                        menu.image_urls or []
+                    ),
+
+                    "menu_image": menu_image,
+
+                    # -----------------------------------------
+                    # SOURCE
+                    # -----------------------------------------
+
+                    "source": source,
+                }
+
+            # =================================================
+            # MEAL RESPONSE
+            # =================================================
+
+            grouped_days[schedule_date].append(
+                {
+                    # -----------------------------------------
+                    # SCHEDULE
+                    # -----------------------------------------
+
+                    "id": str(schedule.id),
+
+                    "schedule_id": str(
+                        schedule.id
+                    ),
+
+                    "subscription_id": str(
+                        subscription.id
+                    ),
+
+                    "date": schedule_date,
+
+                    "meal_type": meal_type,
+
+                    # IMPORTANT:
+                    # This comes from DB and changes
+                    # immediately after OFF/ON.
+                    "status": schedule.status,
+
+                    "cutoff_at": schedule.cutoff_at,
+
+                    # -----------------------------------------
+                    # NORMAL MENU
+                    # -----------------------------------------
+
+                    "menu_id": (
+                        str(menu.id)
+                        if menu
                         else None
-                    )
-                ),
+                    ),
 
-                "menu_name": (
-                    menu.name
-                    if menu
-                    else None
-                ),
+                    "menu_name": (
+                        menu.name
+                        if menu
+                        else None
+                    ),
 
-                "menu_description": (
-                    menu.description
-                    if menu
-                    else None
-                ),
+                    "menu_description": (
+                        menu.description
+                        if menu
+                        else None
+                    ),
 
-                # ---------------------------------------------
-                # PRICE
-                # ---------------------------------------------
+                    # -----------------------------------------
+                    # PRICE
+                    # -----------------------------------------
 
-                # Customer sees discounted price
-                "menu_price": subscription_price,
+                    "meal_price": subscription_price,
 
-                # Original Normal Menu price
-                "normal_menu_price": normal_price,
+                    "menu_price": subscription_price,
 
-                # Subscription price
-                "subscription_price": subscription_price,
+                    "normal_menu_price": normal_price,
 
-                # ---------------------------------------------
-                # MENU CATEGORY
-                # ---------------------------------------------
+                    "subscription_price": subscription_price,
 
-                "menu_category": (
-                    menu.category
-                    if menu
-                    else None
-                ),
+                    # -----------------------------------------
+                    # MENU DATA
+                    # -----------------------------------------
 
-                "food_type": (
-                    menu.food_type
-                    if menu
-                    else None
-                ),
+                    "menu": menu_data,
 
-                # ---------------------------------------------
-                # NUTRITION
-                # ---------------------------------------------
+                    # -----------------------------------------
+                    # MENU DETAILS
+                    # -----------------------------------------
 
-                "calories": (
-                    menu.calories
-                    if menu
-                    else None
-                ),
+                    "menu_category": (
+                        menu.category
+                        if menu
+                        else None
+                    ),
 
-                "protein": (
-                    menu.protein
-                    if menu
-                    else None
-                ),
+                    "food_type": (
+                        menu.food_type
+                        if menu
+                        else None
+                    ),
 
-                "carbs": (
-                    menu.carbs
-                    if menu
-                    else None
-                ),
+                    "calories": (
+                        menu.calories
+                        if menu
+                        else None
+                    ),
 
-                "fats": (
-                    menu.fats
-                    if menu
-                    else None
-                ),
+                    "protein": (
+                        menu.protein
+                        if menu
+                        else None
+                    ),
 
-                # ---------------------------------------------
-                # INGREDIENTS
-                # ---------------------------------------------
+                    "carbs": (
+                        menu.carbs
+                        if menu
+                        else None
+                    ),
 
-                "ingredients": (
-                    menu.ingredients or []
-                    if menu
-                    else []
-                ),
+                    "fats": (
+                        menu.fats
+                        if menu
+                        else None
+                    ),
 
-                # ---------------------------------------------
-                # IMAGE
-                # ---------------------------------------------
+                    "ingredients": (
+                        menu.ingredients or []
+                        if menu
+                        else []
+                    ),
 
-                "menu_image": menu_image,
+                    "image_urls": (
+                        menu.image_urls or []
+                        if menu
+                        else []
+                    ),
 
-                "image_urls": (
-                    menu.image_urls or []
-                    if menu
-                    else []
-                ),
+                    "menu_image": menu_image,
 
-                # ---------------------------------------------
-                # CHEF
-                # ---------------------------------------------
+                    # -----------------------------------------
+                    # CHEF
+                    # -----------------------------------------
 
-                "chef_id": str(
-                    subscription.chef_id
-                ),
+                    "chef_id": str(
+                        subscription.chef_id
+                    ),
 
-                "chef_name": None,
-            })
+                    "chef_name": None,
+
+                    # -----------------------------------------
+                    # SOURCE
+                    # -----------------------------------------
+
+                    "source": source,
+                }
+            )
 
         # =====================================================
-        # 8. CACHE RESULT
+        # 11. SORT DATES
+        # =====================================================
+
+        sorted_dates = sorted(
+            grouped_days.keys()
+        )
+
+        # =====================================================
+        # 12. FIRST 7 DAYS
+        #
+        # Frontend currently needs:
+        # Today + next 6 days
+        #
+        # So default response = first 7
+        # subscription dates.
+        # =====================================================
+
+        sorted_dates = sorted_dates[:7]
+
+        # =====================================================
+        # 13. BUILD FINAL RESPONSE
+        # =====================================================
+
+        result_days = []
+
+        for current_date in sorted_dates:
+
+            meals = grouped_days[
+                current_date
+            ]
+
+            # -----------------------------------------------
+            # SORT BREAKFAST → LUNCH → DINNER
+            # -----------------------------------------------
+
+            meals.sort(
+                key=lambda meal: meal_order.get(
+                    meal["meal_type"],
+                    99,
+                )
+            )
+
+            # -----------------------------------------------
+            # SUBSCRIPTION DAY NUMBER
+            # -----------------------------------------------
+
+            day_number = (
+                current_date
+                - subscription_start_date
+            ).days + 1
+
+            result_days.append(
+                {
+                    "date": current_date,
+
+                    "day": current_date.strftime(
+                        "%A"
+                    ),
+
+                    "day_number": day_number,
+
+                    "meals": meals,
+                }
+            )
+
+        # =====================================================
+        # 14. FINAL RESPONSE
+        # =====================================================
+
+        response = {
+            "success": True,
+
+            "subscription_id": str(
+                subscription.id
+            ),
+
+            "start_date": (
+                subscription_start_date
+            ),
+
+            "end_date": (
+                subscription_end_date
+            ),
+
+            "breakfast_enabled": bool(
+                subscription.breakfast_enabled
+            ),
+
+            "total_days": len(
+                result_days
+            ),
+
+            "days": result_days,
+        }
+
+        # =====================================================
+        # 15. CACHE
         # =====================================================
 
         set_cache(
             cache_key,
-            result,
-            ttl=300,
+            response,
+            ttl=30,
         )
 
         # =====================================================
@@ -2750,34 +2957,37 @@ def get_customer_subscription_menu_cycle(
         # =====================================================
 
         logger.info(
-            "✅ Subscription Menu Cycle Loaded: "
+            "✅ Subscription Menu Cycle Loaded "
+            "from NORMAL MENU: "
             "subscription=%s items=%s",
             subscription_id,
-            len(result),
+            len(result_days),
         )
 
         # =====================================================
         # RETURN
         # =====================================================
 
-        return result
+        return response
 
     # =========================================================
-    # FASTAPI HTTP ERRORS
+    # FASTAPI HTTP ERROR
     # =========================================================
 
     except HTTPException:
         raise
 
     # =========================================================
-    # DATABASE / OTHER ERRORS
+    # UNEXPECTED ERROR
     # =========================================================
 
     except Exception as e:
 
         logger.exception(
             "❌ Failed to load subscription menu cycle: "
-            "subscription_id=%s user_id=%s error=%s",
+            "subscription_id=%s "
+            "user_id=%s "
+            "error=%s",
             subscription_id,
             getattr(user, "id", None),
             str(e),
@@ -2787,6 +2997,9 @@ def get_customer_subscription_menu_cycle(
             status_code=500,
             detail="Unable to load subscription menu",
         )
+# =========================================================
+# TURN MEAL OFF
+# =========================================================
 
 # =========================================================
 # TURN MEAL OFF
@@ -2799,9 +3012,14 @@ async def turn_meal_off(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    # -----------------------------------------------------
-    # VALIDATE MEAL TYPE
-    # -----------------------------------------------------
+
+    # =====================================================
+    # 1. VALIDATE MEAL TYPE
+    # =====================================================
+
+    meal_type = (
+        meal_type or ""
+    ).lower().strip()
 
     if meal_type not in MEAL_CUTOFF_TIMES:
         raise HTTPException(
@@ -2809,9 +3027,9 @@ async def turn_meal_off(
             detail="Invalid meal type",
         )
 
-    # -----------------------------------------------------
-    # FIND SUBSCRIPTION
-    # -----------------------------------------------------
+    # =====================================================
+    # 2. FIND SUBSCRIPTION
+    # =====================================================
 
     subscription = (
         db.query(Subscription)
@@ -2829,41 +3047,28 @@ async def turn_meal_off(
             detail="Active subscription not found",
         )
 
-    # -----------------------------------------------------
-    # FIND PLAN
-    # -----------------------------------------------------
-
-    plan = (
-        db.query(SubscriptionPlan)
-        .filter(
-            SubscriptionPlan.id == subscription.plan_id,
-        )
-        .first()
-    )
-
-    if not plan:
-        raise HTTPException(
-            status_code=404,
-            detail="Subscription plan not found",
-        )
-
-    # -----------------------------------------------------
-    # CURRENT TIME
-    # -----------------------------------------------------
+    # =====================================================
+    # 3. CURRENT TIME
+    # =====================================================
 
     now = datetime.now(IST)
     today = now.date()
 
-    # -----------------------------------------------------
-    # FIND TODAY'S MEAL
-    # -----------------------------------------------------
+    # =====================================================
+    # 4. FIND TODAY'S MEAL
+    # =====================================================
 
     meal = (
         db.query(SubscriptionMealSchedule)
         .filter(
-            SubscriptionMealSchedule.subscription_id == subscription.id,
-            SubscriptionMealSchedule.date == today,
-            SubscriptionMealSchedule.meal_type == meal_type,
+            SubscriptionMealSchedule.subscription_id
+            == subscription.id,
+
+            SubscriptionMealSchedule.date
+            == today,
+
+            SubscriptionMealSchedule.meal_type
+            == meal_type,
         )
         .first()
     )
@@ -2871,57 +3076,65 @@ async def turn_meal_off(
     if not meal:
         raise HTTPException(
             status_code=404,
-            detail=f"{meal_type.title()} is not scheduled for today",
+            detail=(
+                f"{meal_type.title()} "
+                f"is not scheduled for today"
+            ),
         )
 
-    # -----------------------------------------------------
-    # CUTOFF CHECK
-    # -----------------------------------------------------
+    # =====================================================
+    # 5. CUTOFF CHECK
+    # =====================================================
 
     if now >= meal.cutoff_at:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{meal_type.title()} cutoff time has passed. "
+                f"{meal_type.title()} cutoff time "
+                f"has passed. "
                 f"You cannot turn this meal off now."
             ),
         )
 
-    # -----------------------------------------------------
-    # ALREADY OFF
-    # -----------------------------------------------------
+    # =====================================================
+    # 6. ALREADY OFF
+    # =====================================================
 
     if meal.status == "off":
         return {
-            "message": f"{meal_type.title()} is already off",
-            "subscription_id": str(subscription.id),
+            "message": (
+                f"{meal_type.title()} is already off"
+            ),
+            "subscription_id": str(
+                subscription.id
+            ),
             "date": today,
             "meal_type": meal_type,
             "status": "off",
         }
 
-    # -----------------------------------------------------
-    # CALCULATE WALLET CREDIT
-    # -----------------------------------------------------
+    # =====================================================
+    # 7. WALLET CREDIT AMOUNT
+    # =====================================================
 
-    # -----------------------------------------------------
-# CALCULATE WALLET CREDIT
-# -----------------------------------------------------
-
-    amount = float(meal.meal_price or 0)
+    amount = float(
+        meal.meal_price or 0
+    )
 
     try:
-        # -------------------------------------------------
-        # TURN MEAL OFF
-        # -------------------------------------------------
+
+        # =================================================
+        # 8. TURN MEAL OFF
+        # =================================================
 
         meal.status = "off"
 
-        # -------------------------------------------------
-        # CREDIT WALLET
-        # -------------------------------------------------
+        # =================================================
+        # 9. CREDIT WALLET
+        # =================================================
 
         if amount > 0:
+
             credit_wallet(
                 db=db,
                 user_id=user.id,
@@ -2931,55 +3144,96 @@ async def turn_meal_off(
                 subscription_id=subscription.id,
                 schedule_id=meal.id,
                 description=(
-                    f"{meal_type.title()} meal turned off "
-                    f"for {today}"
+                    f"{meal_type.title()} meal "
+                    f"turned off for {today}"
                 ),
             )
 
-        # -------------------------------------------------
-        # CUSTOMER NOTIFICATION
-        # -------------------------------------------------
+        # =================================================
+        # 10. CUSTOMER NOTIFICATION
+        # =================================================
 
         notification = Notification(
             user_id=user.id,
             type="wallet",
             title="Meal Turned Off 💰",
             message=(
-                f"Your {meal_type.title()} meal has been "
-                f"turned off. ₹{amount:.2f} has been added "
+                f"Your {meal_type.title()} meal "
+                f"has been turned off. "
+                f"₹{amount:.2f} has been added "
                 f"to your wallet."
             ),
         )
 
         db.add(notification)
-        # -------------------------------------------------
-# CHEF NOTIFICATION
-# -------------------------------------------------
+
+        # =================================================
+        # 11. CHEF NOTIFICATION
+        # =================================================
 
         chef_notification = Notification(
             user_id=subscription.chef_id,
             type="subscription_meal",
             title="Meal Turned Off ⚠️",
             message=(
-             f"{user.name} has turned OFF "
-             f"{meal_type.title()} for {today}. "
-             f"₹{amount:.2f} has been credited to the customer's wallet."
+                f"{user.name} has turned OFF "
+                f"{meal_type.title()} for {today}. "
+                f"₹{amount:.2f} has been credited "
+                f"to the customer's wallet."
             ),
         )
 
         db.add(chef_notification)
 
-        # -------------------------------------------------
-        # COMMIT
-        # -------------------------------------------------
+        # =================================================
+        # 12. COMMIT
+        # =================================================
 
         db.commit()
         db.refresh(meal)
+
+        # =================================================
+        # 13. CLEAR OLD TODAY CACHE
+        # =================================================
+
         delete_cache(
             f"subscription:today:"
             f"{subscription.id}:"
             f"{user.id}"
         )
+
+        # =================================================
+        # 14. CLEAR TODAY V2 CACHE
+        #
+        # THIS IS THE IMPORTANT FIX
+        # =================================================
+
+        delete_cache(
+            f"subscription:today:v2:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # =================================================
+        # 15. CLEAR SUBSCRIPTION MENU CACHE
+        # =================================================
+
+        delete_cache(
+            f"subscription:menu-cycle:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # New v2 menu-cycle cache
+        delete_cache(
+            f"subscription:menu-cycle:v2:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # =================================================
+        # 16. CLEAR SUBSCRIPTION MEALS CACHE
+        # =================================================
 
         delete_cache(
             f"subscription:meals:"
@@ -2992,46 +3246,74 @@ async def turn_meal_off(
             f"{subscription.id}:"
             f"{user.id}:True"
         )
-        
-        # -------------------------------------------------
-# WHATSAPP ADMIN NOTIFICATION
-# -------------------------------------------------
+
+        # =================================================
+        # 17. WHATSAPP
+        # =================================================
 
         try:
+
             await send_subscription_meal_whatsapp(
-              customer_name=user.name,
-              meal_type=meal_type,
-              action="off",
-              date=str(today),
-              amount=amount,
+                customer_name=user.name,
+                meal_type=meal_type,
+                action="off",
+                date=str(today),
+                amount=amount,
             )
 
         except Exception:
+
             logger.exception(
-              "Failed to send diet OFF WhatsApp notification"
+                "Failed to send diet OFF "
+                "WhatsApp notification"
             )
-        
+
     except HTTPException:
+
         db.rollback()
         raise
 
-    except Exception:
+    except Exception as e:
+
         db.rollback()
+
+        logger.exception(
+            "❌ Failed to turn meal OFF: %s",
+            str(e),
+        )
 
         raise HTTPException(
             status_code=500,
             detail="Unable to turn meal off",
         )
 
+    # =====================================================
+    # 18. RESPONSE
+    # =====================================================
+
     return {
-        "message": f"{meal_type.title()} turned off successfully",
-        "subscription_id": str(subscription.id),
+        "message": (
+            f"{meal_type.title()} "
+            f"turned off successfully"
+        ),
+
+        "subscription_id": str(
+            subscription.id
+        ),
+
         "date": today,
+
         "meal_type": meal_type,
+
         "status": "off",
+
         "wallet_credit": amount,
+
         "cutoff_at": meal.cutoff_at,
     }
+# =========================================================
+# TURN MEAL ON
+# =========================================================
 
 # =========================================================
 # TURN MEAL ON
@@ -3044,9 +3326,14 @@ async def turn_meal_on(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    # -----------------------------------------------------
-    # VALIDATE MEAL TYPE
-    # -----------------------------------------------------
+
+    # =====================================================
+    # 1. VALIDATE MEAL TYPE
+    # =====================================================
+
+    meal_type = (
+        meal_type or ""
+    ).lower().strip()
 
     if meal_type not in MEAL_CUTOFF_TIMES:
         raise HTTPException(
@@ -3054,9 +3341,9 @@ async def turn_meal_on(
             detail="Invalid meal type",
         )
 
-    # -----------------------------------------------------
-    # FIND SUBSCRIPTION
-    # -----------------------------------------------------
+    # =====================================================
+    # 2. FIND SUBSCRIPTION
+    # =====================================================
 
     subscription = (
         db.query(Subscription)
@@ -3074,41 +3361,28 @@ async def turn_meal_on(
             detail="Active subscription not found",
         )
 
-    # -----------------------------------------------------
-    # FIND PLAN
-    # -----------------------------------------------------
-
-    plan = (
-        db.query(SubscriptionPlan)
-        .filter(
-            SubscriptionPlan.id == subscription.plan_id,
-        )
-        .first()
-    )
-
-    if not plan:
-        raise HTTPException(
-            status_code=404,
-            detail="Subscription plan not found",
-        )
-
-    # -----------------------------------------------------
-    # CURRENT TIME
-    # -----------------------------------------------------
+    # =====================================================
+    # 3. CURRENT TIME
+    # =====================================================
 
     now = datetime.now(IST)
     today = now.date()
 
-    # -----------------------------------------------------
-    # FIND TODAY'S MEAL
-    # -----------------------------------------------------
+    # =====================================================
+    # 4. FIND TODAY'S MEAL
+    # =====================================================
 
     meal = (
         db.query(SubscriptionMealSchedule)
         .filter(
-            SubscriptionMealSchedule.subscription_id == subscription.id,
-            SubscriptionMealSchedule.date == today,
-            SubscriptionMealSchedule.meal_type == meal_type,
+            SubscriptionMealSchedule.subscription_id
+            == subscription.id,
+
+            SubscriptionMealSchedule.date
+            == today,
+
+            SubscriptionMealSchedule.meal_type
+            == meal_type,
         )
         .first()
     )
@@ -3116,52 +3390,65 @@ async def turn_meal_on(
     if not meal:
         raise HTTPException(
             status_code=404,
-            detail=f"{meal_type.title()} is not scheduled for today",
+            detail=(
+                f"{meal_type.title()} "
+                f"is not scheduled for today"
+            ),
         )
 
-    # -----------------------------------------------------
-    # CUTOFF CHECK
-    # -----------------------------------------------------
+    # =====================================================
+    # 5. CUTOFF CHECK
+    # =====================================================
 
     if now >= meal.cutoff_at:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{meal_type.title()} cutoff time has passed. "
+                f"{meal_type.title()} cutoff time "
+                f"has passed. "
                 f"You cannot turn this meal on now."
             ),
         )
 
-    # -----------------------------------------------------
-    # ALREADY ON
-    # -----------------------------------------------------
+    # =====================================================
+    # 6. ALREADY ON
+    # =====================================================
 
     if meal.status == "on":
         return {
-            "message": f"{meal_type.title()} is already on",
-            "subscription_id": str(subscription.id),
+            "message": (
+                f"{meal_type.title()} is already on"
+            ),
+
+            "subscription_id": str(
+                subscription.id
+            ),
+
             "date": today,
+
             "meal_type": meal_type,
+
             "status": "on",
         }
 
-    # -----------------------------------------------------
-    # CALCULATE WALLET DEBIT
-    # -----------------------------------------------------
+    # =====================================================
+    # 7. AMOUNT
+    # =====================================================
 
-    # -----------------------------------------------------
-# CALCULATE WALLET DEBIT
-# -----------------------------------------------------
-
-    amount = float(meal.meal_price or 0)
+    amount = float(
+        meal.meal_price or 0
+    )
 
     try:
-        # -------------------------------------------------
-        # DEBIT WALLET
-        # -------------------------------------------------
+
+        # =================================================
+        # 8. DEBIT WALLET
+        # =================================================
 
         if amount > 0:
+
             try:
+
                 debit_wallet(
                     db=db,
                     user_id=user.id,
@@ -3171,75 +3458,119 @@ async def turn_meal_on(
                     subscription_id=subscription.id,
                     schedule_id=meal.id,
                     description=(
-                        f"{meal_type.title()} meal turned "
-                        f"on for {today}"
+                        f"{meal_type.title()} meal "
+                        f"turned on for {today}"
                     ),
                 )
 
             except ValueError:
+
                 db.rollback()
 
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         f"Insufficient wallet balance. "
-                        f"₹{amount:.2f} required to turn "
-                        f"{meal_type.title()} back on."
+                        f"₹{amount:.2f} required to "
+                        f"turn {meal_type.title()} "
+                        f"back on."
                     ),
                 )
 
-        # -------------------------------------------------
-        # TURN MEAL ON
-        # -------------------------------------------------
+        # =================================================
+        # 9. TURN MEAL ON
+        # =================================================
 
         meal.status = "on"
 
-        # -------------------------------------------------
-        # CUSTOMER NOTIFICATION
-        # -------------------------------------------------
+        # =================================================
+        # 10. CUSTOMER NOTIFICATION
+        # =================================================
 
         notification = Notification(
             user_id=user.id,
             type="wallet",
             title="Meal Turned On 🍱",
             message=(
-                f"Your {meal_type.title()} meal has been "
-                f"turned on. ₹{amount:.2f} has been deducted "
+                f"Your {meal_type.title()} meal "
+                f"has been turned on. "
+                f"₹{amount:.2f} has been deducted "
                 f"from your wallet."
             ),
         )
 
         db.add(notification)
-        
-        # -------------------------------------------------
-# CHEF NOTIFICATION
-# -------------------------------------------------
+
+        # =================================================
+        # 11. CHEF NOTIFICATION
+        # =================================================
 
         chef_notification = Notification(
-           user_id=subscription.chef_id,
-           type="subscription_meal",
-           title="Meal Turned On 🍱",
-           message=(
-             f"{user.name} has turned ON "
-             f"{meal_type.title()} for {today}. "
-             f"₹{amount:.2f} has been deducted from "
-             f"the customer's wallet."
+            user_id=subscription.chef_id,
+            type="subscription_meal",
+            title="Meal Turned On 🍱",
+            message=(
+                f"{user.name} has turned ON "
+                f"{meal_type.title()} for {today}. "
+                f"₹{amount:.2f} has been deducted "
+                f"from the customer's wallet."
             ),
         )
 
         db.add(chef_notification)
-  
-        # -------------------------------------------------
-        # COMMIT
-        # -------------------------------------------------
+
+        # =================================================
+        # 12. COMMIT
+        # =================================================
 
         db.commit()
         db.refresh(meal)
+
+        # =================================================
+        # 13. CLEAR OLD TODAY CACHE
+        # =================================================
+
         delete_cache(
             f"subscription:today:"
             f"{subscription.id}:"
             f"{user.id}"
         )
+
+        # =================================================
+        # 14. CLEAR TODAY V2 CACHE
+        #
+        # IMPORTANT FIX
+        # =================================================
+
+        delete_cache(
+            f"subscription:today:v2:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # =================================================
+        # 15. CLEAR OLD MENU CYCLE CACHE
+        # =================================================
+
+        delete_cache(
+            f"subscription:menu-cycle:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # =================================================
+        # 16. CLEAR NEW MENU CYCLE CACHE
+        # =================================================
+
+        delete_cache(
+            f"subscription:menu-cycle:v2:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # =================================================
+        # 17. CLEAR SUBSCRIPTION MEALS CACHE
+        # =================================================
 
         delete_cache(
             f"subscription:meals:"
@@ -3252,40 +3583,71 @@ async def turn_meal_on(
             f"{subscription.id}:"
             f"{user.id}:True"
         )
+
+        # =================================================
+        # 18. WHATSAPP
+        # =================================================
+
         try:
+
             await send_subscription_meal_whatsapp(
-             customer_name=user.name,
-             meal_type=meal_type,
-             action="on",
-             date=str(today),
-             amount=amount,
+                customer_name=user.name,
+                meal_type=meal_type,
+                action="on",
+                date=str(today),
+                amount=amount,
             )
 
         except Exception:
+
             logger.exception(
-             "Failed to send diet ON WhatsApp notification"
+                "Failed to send diet ON "
+                "WhatsApp notification"
             )
+
     except HTTPException:
+
+        db.rollback()
         raise
 
-    except Exception:
+    except Exception as e:
+
         db.rollback()
+
+        logger.exception(
+            "❌ Failed to turn meal ON: %s",
+            str(e),
+        )
 
         raise HTTPException(
             status_code=500,
             detail="Unable to turn meal on",
         )
 
+    # =====================================================
+    # 19. RESPONSE
+    # =====================================================
+
     return {
-        "message": f"{meal_type.title()} turned on successfully",
-        "subscription_id": str(subscription.id),
+        "message": (
+            f"{meal_type.title()} "
+            f"turned on successfully"
+        ),
+
+        "subscription_id": str(
+            subscription.id
+        ),
+
         "date": today,
+
         "meal_type": meal_type,
+
         "status": "on",
+
         "wallet_debit": amount,
+
         "cutoff_at": meal.cutoff_at,
     }
-    
 
 
 # =========================================================
