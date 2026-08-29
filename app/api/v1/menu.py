@@ -1409,38 +1409,82 @@ def create_or_update_menu_cycle(
     user=Depends(require_role(["chef"])),
 ):
     # =====================================================
-    # VALIDATION
+    # 1. VALIDATION
     # =====================================================
 
     if not data.items:
         raise HTTPException(
             status_code=400,
-            detail="At least one menu day is required",
+            detail="At least one menu entry is required",
         )
 
-    if len(data.items) > MENU_CYCLE_DAYS:
+    # Maximum:
+    # 30 days × 3 meals = 90 entries
+    if len(data.items) > 90:
         raise HTTPException(
             status_code=400,
-            detail="Maximum 30 days are allowed",
+            detail=(
+                "Maximum 90 entries are allowed "
+                "(30 days × 3 meals)"
+            ),
         )
 
     # =====================================================
-    # DUPLICATE DAY CHECK
+    # 2. VALIDATE DAY + MEAL TYPE
     # =====================================================
 
-    cycle_days = [
-        item.cycle_day
-        for item in data.items
-    ]
+    valid_meals = {
+        "breakfast",
+        "lunch",
+        "dinner",
+    }
 
-    if len(cycle_days) != len(set(cycle_days)):
-        raise HTTPException(
-            status_code=400,
-            detail="Duplicate cycle day is not allowed",
+    combinations = set()
+
+    for item in data.items:
+
+        if item.cycle_day < 1 or item.cycle_day > 30:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"cycle_day must be between 1 and 30"
+                ),
+            )
+
+        meal_type = (
+            str(item.meal_type)
+            .lower()
+            .strip()
         )
 
+        if meal_type not in valid_meals:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid meal_type. "
+                    "Use breakfast, lunch or dinner."
+                ),
+            )
+
+        key = (
+            item.cycle_day,
+            meal_type,
+        )
+
+        if key in combinations:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Duplicate entry for "
+                    f"Day {item.cycle_day} "
+                    f"{meal_type}"
+                ),
+            )
+
+        combinations.add(key)
+
     # =====================================================
-    # MENU IDS
+    # 3. MENU IDS
     # =====================================================
 
     menu_ids = [
@@ -1464,7 +1508,7 @@ def create_or_update_menu_cycle(
     }
 
     # =====================================================
-    # VERIFY MENU OWNERSHIP
+    # 4. VERIFY MENU OWNERSHIP
     # =====================================================
 
     for item in data.items:
@@ -1481,7 +1525,7 @@ def create_or_update_menu_cycle(
             )
 
     # =====================================================
-    # EXISTING CYCLE
+    # 5. EXISTING CYCLE
     # =====================================================
 
     existing_cycles = (
@@ -1494,24 +1538,48 @@ def create_or_update_menu_cycle(
         .all()
     )
 
+    # IMPORTANT:
+    # Key must be:
+    # (day, meal_type)
+    #
+    # NOT only:
+    # day
+    # =====================================================
+
     existing_map = {
-        cycle.cycle_day: cycle
+        (
+            cycle.cycle_day,
+            (
+                cycle.meal_type
+                or ""
+            ).lower().strip(),
+        ): cycle
         for cycle in existing_cycles
     }
 
     # =====================================================
-    # UPSERT
+    # 6. UPSERT
     # =====================================================
 
     for item in data.items:
 
-        existing = existing_map.get(
-            item.cycle_day
+        meal_type = (
+            str(item.meal_type)
+            .lower()
+            .strip()
         )
+
+        key = (
+            item.cycle_day,
+            meal_type,
+        )
+
+        existing = existing_map.get(key)
 
         if existing:
 
             existing.menu_id = item.menu_id
+            existing.meal_type = meal_type
 
         else:
 
@@ -1520,31 +1588,41 @@ def create_or_update_menu_cycle(
                 menu_id=item.menu_id,
                 cycle_day=item.cycle_day,
                 cycle_start_date=data.cycle_start_date,
+                meal_type=meal_type,
             )
 
             db.add(cycle)
 
     # =====================================================
-    # COMMIT
+    # 7. COMMIT
     # =====================================================
 
     try:
 
         db.commit()
-        current_date = datetime.now(INDIA_TZ).date()
+
+        current_date = datetime.now(
+            INDIA_TZ
+        ).date()
 
         delete_cache(
-           f"chef:7day-menu:{user.id}:{current_date.isoformat()}"
+            f"chef:7day-menu:"
+            f"{user.id}:"
+            f"{current_date.isoformat()}"
         )
 
-    # Clear normal chef menu cache
         delete_cache(
-           f"menu:{user.id}"
+            f"menu:{user.id}"
         )
 
     except Exception as e:
 
         db.rollback()
+
+        logger.exception(
+            "❌ MENU CYCLE SAVE ERROR: %s",
+            str(e),
+        )
 
         raise HTTPException(
             status_code=500,
@@ -1552,7 +1630,7 @@ def create_or_update_menu_cycle(
         )
 
     # =====================================================
-    # RETURN COMPLETE CYCLE
+    # 8. RETURN COMPLETE CYCLE
     # =====================================================
 
     cycles = (
@@ -1563,7 +1641,8 @@ def create_or_update_menu_cycle(
             == data.cycle_start_date,
         )
         .order_by(
-            MenuCycle.cycle_day.asc()
+            MenuCycle.cycle_day.asc(),
+            MenuCycle.meal_type.asc(),
         )
         .all()
     )
@@ -1577,6 +1656,7 @@ def create_or_update_menu_cycle(
             .filter(
                 Menu.id == cycle.menu_id,
                 Menu.chef_id == user.id,
+                Menu.is_deleted == False,
             )
             .first()
         )
@@ -1591,12 +1671,18 @@ def create_or_update_menu_cycle(
                 menu_id=cycle.menu_id,
                 cycle_day=cycle.cycle_day,
                 cycle_start_date=cycle.cycle_start_date,
+                meal_type=cycle.meal_type,
             )
         )
 
     return MenuCycleResponse(
         cycle_start_date=data.cycle_start_date,
-        total_days=len(response_items),
+        total_days=len(
+            set(
+                item.cycle_day
+                for item in response_items
+            )
+        ),
         items=response_items,
     )
     
