@@ -530,31 +530,39 @@ def get_menu_for_day(
     meal_type: str,
 ):
     """
-    Resolve final menu for a specific date + meal.
+    Resolve the NORMAL MENU for a specific:
+
+        chef + date + meal_type
 
     Priority:
+        1. Date override
+        2. Configured 30-day menu cycle
+        3. Repeating latest cycle
 
-    1. Date override
-    2. Explicit configured cycle
-    3. Automatic repeating cycle
+    IMPORTANT:
+    This function returns the actual Menu record.
+
+    Subscription, normal menu and other customer flows
+    should use this function so that the same menu is shown
+    everywhere for the same date + meal type.
     """
 
-    # -----------------------------------------------------
-    # NORMALIZE MEAL
-    # -----------------------------------------------------
+    # =====================================================
+    # 1. NORMALIZE MEAL TYPE
+    # =====================================================
 
-    meal_type = meal_type.lower().strip()
+    meal_type = (
+        meal_type
+        .lower()
+        .strip()
+    )
 
     if meal_type not in VALID_MEALS:
         return None, None
 
-    # -----------------------------------------------------
-    # 1. DATE OVERRIDE
-    #
-    # NOTE:
-    # Current MenuDateOverride model is date-only,
-    # so existing override applies to the date.
-    # -----------------------------------------------------
+    # =====================================================
+    # 2. DATE OVERRIDE
+    # =====================================================
 
     override = (
         db.query(MenuDateOverride)
@@ -580,9 +588,9 @@ def get_menu_for_day(
         if menu:
             return menu, "date_override"
 
-    # -----------------------------------------------------
-    # 2. RESOLVE CYCLE + DAY
-    # -----------------------------------------------------
+    # =====================================================
+    # 3. RESOLVE 30-DAY CYCLE + CYCLE DAY
+    # =====================================================
 
     cycle, cycle_day = resolve_cycle_and_day(
         db=db,
@@ -590,21 +598,38 @@ def get_menu_for_day(
         target_date=target_date,
     )
 
+    # No cycle available
     if not cycle:
         return None, None
 
-    # -----------------------------------------------------
-    # 3. FIND MENU FOR DAY + MEAL
-    # -----------------------------------------------------
+    # =====================================================
+    # 4. FIND EXACT MENU CYCLE ITEM
+    #
+    # IMPORTANT:
+    # We match ALL of these:
+    #
+    # chef
+    # cycle start date
+    # cycle day
+    # meal type
+    #
+    # This prevents Day 1 lunch from accidentally
+    # returning Day 2 / another meal's menu.
+    # =====================================================
 
     cycle_item = (
         db.query(MenuCycle)
         .filter(
             MenuCycle.chef_id == chef_id,
+
             MenuCycle.cycle_start_date
             == cycle.cycle_start_date,
-            MenuCycle.cycle_day == cycle_day,
-            MenuCycle.meal_type == meal_type,
+
+            MenuCycle.cycle_day
+            == cycle_day,
+
+            MenuCycle.meal_type
+            == meal_type,
         )
         .first()
     )
@@ -612,9 +637,9 @@ def get_menu_for_day(
     if not cycle_item:
         return None, None
 
-    # -----------------------------------------------------
-    # 4. GET ACTUAL MENU
-    # -----------------------------------------------------
+    # =====================================================
+    # 5. GET ACTUAL NORMAL MENU
+    # =====================================================
 
     menu = (
         db.query(Menu)
@@ -629,9 +654,9 @@ def get_menu_for_day(
     if not menu:
         return None, None
 
-    # -----------------------------------------------------
-    # DETERMINE SOURCE
-    # -----------------------------------------------------
+    # =====================================================
+    # 6. DETERMINE SOURCE
+    # =====================================================
 
     actual_cycle_end = get_cycle_end_date(
         cycle.cycle_start_date
@@ -645,6 +670,10 @@ def get_menu_for_day(
         source = "cycle"
     else:
         source = "cycle_repeat"
+
+    # =====================================================
+    # 7. RETURN NORMAL MENU
+    # =====================================================
 
     return menu, source
 
