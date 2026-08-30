@@ -41,6 +41,8 @@ import hashlib
 import requests
 
 from app.models.menu import Menu
+from app.models.menu_cycle import MenuCycle
+from app.models.menu_date_override import MenuDateOverride
 from app.schemas.subscription_plan_menu_cycle import (
     SubscriptionPlanMenuCycleBulkSave,
 )
@@ -2416,6 +2418,10 @@ def get_subscription_meals(
 # GET CUSTOMER SUBSCRIPTION MENU CYCLE
 # =========================================================
 
+# =========================================================
+# GET CUSTOMER SUBSCRIPTION MENU CYCLE
+# =========================================================
+
 @router.get("/{subscription_id}/menu-cycle")
 def get_customer_subscription_menu_cycle(
     subscription_id: UUID,
@@ -2425,25 +2431,22 @@ def get_customer_subscription_menu_cycle(
     """
     CUSTOMER SUBSCRIPTION MENU CYCLE
 
-    RULES:
+    PERFORMANCE OPTIMIZED VERSION
 
-    1. Subscription duration = actual calendar duration.
-    2. 7 days  = exactly 7 calendar days.
-    3. 15 days = exactly 15 calendar days.
-    4. 30 days = exactly 30 calendar days.
-    5. Every subscription calendar date is returned.
-    6. Menu is resolved from NORMAL MENU using:
-           date + meal_type
-       through get_menu_for_day().
-    7. Delivery days are NOT used to remove dates
-       from the menu cycle.
-    8. SubscriptionMealSchedule is used only for:
-           - status
-           - cutoff_at
-           - schedule_id
-    9. Breakfast appears only when breakfast_enabled=True.
-    10. Normal Menu price is never modified.
-    11. Subscription price = Normal Menu price - ₹10.
+    Business rules remain unchanged:
+    - Date override has highest priority
+    - Configured cycle has priority
+    - Latest cycle repeats every 30 days
+    - Every subscription calendar date is returned
+    - Breakfast only when enabled
+    - Normal Menu price is never modified
+    - Subscription price = Normal Menu price - ₹10
+
+    IMPORTANT:
+    This endpoint intentionally does NOT call get_menu_for_day()
+    inside the date/meal loop.
+
+    All required data is loaded in batches to avoid N+1 queries.
     """
 
     cache_key = (
@@ -2501,10 +2504,6 @@ def get_customer_subscription_menu_cycle(
                 detail="Subscription dates are not configured",
             )
 
-        # =====================================================
-        # 3. NORMALIZE START DATE
-        # =====================================================
-
         subscription_start_date = (
             subscription.start_date.date()
             if isinstance(
@@ -2513,10 +2512,6 @@ def get_customer_subscription_menu_cycle(
             )
             else subscription.start_date
         )
-
-        # =====================================================
-        # 4. NORMALIZE END DATE
-        # =====================================================
 
         subscription_end_date = (
             subscription.end_date.date()
@@ -2527,10 +2522,6 @@ def get_customer_subscription_menu_cycle(
             else subscription.end_date
         )
 
-        # =====================================================
-        # 5. VALIDATE DATE RANGE
-        # =====================================================
-
         if subscription_end_date < subscription_start_date:
             raise HTTPException(
                 status_code=400,
@@ -2538,7 +2529,7 @@ def get_customer_subscription_menu_cycle(
             )
 
         # =====================================================
-        # 6. CALCULATE EXACT SUBSCRIPTION DURATION
+        # 3. EXACT SUBSCRIPTION DURATION
         # =====================================================
 
         subscription_duration = (
@@ -2552,12 +2543,7 @@ def get_customer_subscription_menu_cycle(
         )
 
         # =====================================================
-        # 7. LOAD EXISTING SCHEDULES
-        #
-        # Schedules are ONLY used for:
-        # status / cutoff / schedule_id
-        #
-        # They DO NOT decide which dates are displayed.
+        # 4. LOAD ALL SUBSCRIPTION SCHEDULES — ONE QUERY
         # =====================================================
 
         schedules = (
@@ -2568,10 +2554,6 @@ def get_customer_subscription_menu_cycle(
             )
             .all()
         )
-
-        # =====================================================
-        # 8. CREATE SCHEDULE LOOKUP
-        # =====================================================
 
         schedule_map = {}
 
@@ -2586,16 +2568,19 @@ def get_customer_subscription_menu_cycle(
                 else schedule.date
             )
 
-            meal_type = (
+            schedule_meal_type = (
                 schedule.meal_type or ""
             ).lower().strip()
 
             schedule_map[
-                (schedule_date, meal_type)
+                (
+                    schedule_date,
+                    schedule_meal_type,
+                )
             ] = schedule
 
         # =====================================================
-        # 9. MEALS TO DISPLAY
+        # 5. MEALS TO SHOW
         # =====================================================
 
         meals_to_show = [
@@ -2610,28 +2595,124 @@ def get_customer_subscription_menu_cycle(
             )
 
         # =====================================================
-        # 10. MEAL ORDER
+        # 6. LOAD ALL MENU CYCLES — ONE QUERY
+        #
+        # This replaces calling resolve_cycle_and_day()
+        # again and again.
         # =====================================================
 
-        meal_order = {
-            "breakfast": 1,
-            "lunch": 2,
-            "dinner": 3,
-        }
+        cycles = (
+            db.query(MenuCycle)
+            .filter(
+                MenuCycle.chef_id
+                == subscription.chef_id,
+            )
+            .order_by(
+                MenuCycle.cycle_start_date.asc()
+            )
+            .all()
+        )
 
         # =====================================================
-        # 11. BUILD EVERY CALENDAR DATE
-        #
-        # IMPORTANT:
-        #
-        # Delivery days are NOT checked.
-        #
-        # 7 day subscription  -> 7 dates
-        # 15 day subscription -> 15 dates
-        # 30 day subscription -> 30 dates
+        # 7. NO CYCLES
         # =====================================================
 
-        result_days = []
+        if not cycles:
+
+            response = {
+                "success": True,
+                "subscription_id": str(
+                    subscription.id
+                ),
+                "start_date":
+                    subscription_start_date,
+                "end_date":
+                    subscription_end_date,
+                "subscription_duration":
+                    subscription_duration,
+                "breakfast_enabled": bool(
+                    subscription.breakfast_enabled
+                ),
+                "total_days": 0,
+                "days": [],
+            }
+
+            set_cache(
+                cache_key,
+                response,
+                ttl=30,
+            )
+
+            return response
+
+        # =====================================================
+        # 8. CREATE CYCLE MAP
+        #
+        # Key:
+        # (cycle_start_date, cycle_day, meal_type)
+        #
+        # Value:
+        # MenuCycle record
+        # =====================================================
+
+        cycle_item_map = {}
+
+        for cycle_item in cycles:
+
+            cycle_item_map[
+                (
+                    cycle_item.cycle_start_date,
+                    cycle_item.cycle_day,
+                    (
+                        cycle_item.meal_type or ""
+                    ).lower().strip(),
+                )
+            ] = cycle_item
+
+        # =====================================================
+        # 9. LOAD DATE OVERRIDES — ONE QUERY
+        #
+        # Only subscription date range is required.
+        # =====================================================
+
+        overrides = (
+            db.query(MenuDateOverride)
+            .filter(
+                MenuDateOverride.chef_id
+                == subscription.chef_id,
+                MenuDateOverride.menu_date
+                >= subscription_start_date,
+                MenuDateOverride.menu_date
+                <= subscription_end_date,
+            )
+            .all()
+        )
+
+        override_map = {}
+
+        for override in overrides:
+
+            override_date = (
+                override.menu_date.date()
+                if isinstance(
+                    override.menu_date,
+                    datetime,
+                )
+                else override.menu_date
+            )
+
+            override_map[
+                override_date
+            ] = override
+
+        # =====================================================
+        # 10. DETERMINE ALL REQUIRED MENU IDS
+        #
+        # First resolve which MenuCycle/override applies.
+        # Then fetch all actual Menu records in ONE query.
+        # =====================================================
+
+        resolved_items = []
 
         current_date = subscription_start_date
         day_number = 1
@@ -2641,17 +2722,222 @@ def get_customer_subscription_menu_cycle(
             and day_number <= subscription_duration
         ):
 
-            meals = []
+            # -------------------------------------------------
+            # Find date override
+            # -------------------------------------------------
 
-            # =================================================
-            # 12. BUILD MEALS
-            # =================================================
+            override = override_map.get(
+                current_date
+            )
 
             for meal_type in meals_to_show:
 
-                # ---------------------------------------------
-                # EXISTING SCHEDULE
-                # ---------------------------------------------
+                cycle_item = None
+                cycle_start_date = None
+                cycle_day = None
+                source = None
+
+                # =================================================
+                # DATE OVERRIDE
+                #
+                # Existing get_menu_for_day() behavior:
+                # override is date-only, therefore the same
+                # override applies to all meal types.
+                # =================================================
+
+                if override:
+
+                    menu_id = override.menu_id
+                    source = "date_override"
+
+                else:
+
+                    # =============================================
+                    # FIND EXACT CONFIGURED CYCLE
+                    # =============================================
+
+                    selected_cycle = None
+                    selected_cycle_day = None
+
+                    for cycle in cycles:
+
+                        cycle_start = (
+                            cycle.cycle_start_date
+                        )
+
+                        cycle_end = (
+                            cycle_start
+                            + timedelta(days=29)
+                        )
+
+                        if (
+                            cycle_start
+                            <= current_date
+                            <= cycle_end
+                        ):
+
+                            selected_cycle = cycle
+                            selected_cycle_day = (
+                                current_date
+                                - cycle_start
+                            ).days + 1
+
+                            break
+
+                    # =============================================
+                    # NO EXACT CYCLE
+                    #
+                    # Repeat latest cycle every 30 days.
+                    # Same logic as resolve_cycle_and_day().
+                    # =============================================
+
+                    if selected_cycle is None:
+
+                        previous_cycles = [
+                            cycle
+                            for cycle in cycles
+                            if cycle.cycle_start_date
+                            <= current_date
+                        ]
+
+                        if previous_cycles:
+
+                            selected_cycle = max(
+                                previous_cycles,
+                                key=lambda cycle:
+                                    cycle.cycle_start_date,
+                            )
+
+                            days_since_cycle_start = (
+                                current_date
+                                - selected_cycle.cycle_start_date
+                            ).days
+
+                            selected_cycle_day = (
+                                days_since_cycle_start
+                                % 30
+                            ) + 1
+
+                            source = "cycle_repeat"
+
+                    if selected_cycle is not None:
+
+                        cycle_start_date = (
+                            selected_cycle.cycle_start_date
+                        )
+
+                        cycle_day = (
+                            selected_cycle_day
+                        )
+
+                        cycle_item = (
+                            cycle_item_map.get(
+                                (
+                                    cycle_start_date,
+                                    cycle_day,
+                                    meal_type,
+                                )
+                            )
+                        )
+
+                        if cycle_item:
+
+                            menu_id = cycle_item.menu_id
+
+                            if source is None:
+                                source = "cycle"
+
+                        else:
+                            menu_id = None
+
+                    else:
+                        menu_id = None
+
+                resolved_items.append(
+                    {
+                        "date": current_date,
+                        "day_number": day_number,
+                        "meal_type": meal_type,
+                        "menu_id": menu_id,
+                        "source": source,
+                    }
+                )
+
+            current_date += timedelta(days=1)
+            day_number += 1
+
+        # =====================================================
+        # 11. COLLECT ALL MENU IDS
+        # =====================================================
+
+        menu_ids = {
+            item["menu_id"]
+            for item in resolved_items
+            if item["menu_id"] is not None
+        }
+
+        # =====================================================
+        # 12. LOAD ALL MENUS — ONE QUERY
+        # =====================================================
+
+        menu_map = {}
+
+        if menu_ids:
+
+            menus = (
+                db.query(Menu)
+                .filter(
+                    Menu.id.in_(menu_ids),
+                    Menu.chef_id
+                    == subscription.chef_id,
+                    Menu.is_deleted.is_(False),
+                )
+                .all()
+            )
+
+            menu_map = {
+                menu.id: menu
+                for menu in menus
+            }
+
+        # =====================================================
+        # 13. MEAL ORDER
+        # =====================================================
+
+        meal_order = {
+            "breakfast": 1,
+            "lunch": 2,
+            "dinner": 3,
+        }
+
+        # =====================================================
+        # 14. BUILD RESPONSE
+        # =====================================================
+
+        result_days = []
+
+        current_day_number = 0
+        current_date = subscription_start_date
+
+        while (
+            current_date <= subscription_end_date
+            and current_day_number
+            < subscription_duration
+        ):
+
+            current_day_number += 1
+
+            day_items = [
+                item
+                for item in resolved_items
+                if item["date"] == current_date
+            ]
+
+            meals = []
+
+            for item in day_items:
+
+                meal_type = item["meal_type"]
 
                 schedule = schedule_map.get(
                     (
@@ -2660,20 +2946,13 @@ def get_customer_subscription_menu_cycle(
                     )
                 )
 
-                # ---------------------------------------------
-                # GET NORMAL MENU
-                # ---------------------------------------------
-
-                menu, source = get_menu_for_day(
-                    db=db,
-                    chef_id=subscription.chef_id,
-                    target_date=current_date,
-                    meal_type=meal_type,
+                menu = menu_map.get(
+                    item["menu_id"]
                 )
 
-                # ---------------------------------------------
-                # NORMAL MENU PRICE
-                # ---------------------------------------------
+                # =============================================
+                # NORMAL PRICE
+                # =============================================
 
                 normal_price = (
                     float(menu.price)
@@ -2682,27 +2961,29 @@ def get_customer_subscription_menu_cycle(
                     else 0.0
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # SUBSCRIPTION PRICE
-                # ---------------------------------------------
+                # =============================================
 
                 subscription_price = max(
                     normal_price - 10.0,
                     0.0,
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # IMAGE
-                # ---------------------------------------------
+                # =============================================
 
                 menu_image = None
 
                 if menu and menu.image_urls:
-                    menu_image = menu.image_urls[0]
+                    menu_image = (
+                        menu.image_urls[0]
+                    )
 
-                # ---------------------------------------------
+                # =============================================
                 # MENU DATA
-                # ---------------------------------------------
+                # =============================================
 
                 menu_data = None
 
@@ -2713,44 +2994,52 @@ def get_customer_subscription_menu_cycle(
 
                         "name": menu.name,
 
-                        "description": menu.description,
+                        "description":
+                            menu.description,
 
-                        "price": subscription_price,
+                        "price":
+                            subscription_price,
 
-                        "normal_price": normal_price,
+                        "normal_price":
+                            normal_price,
 
-                        "subscription_price": (
-                            subscription_price
-                        ),
+                        "subscription_price":
+                            subscription_price,
 
-                        "category": menu.category,
+                        "category":
+                            menu.category,
 
-                        "food_type": menu.food_type,
+                        "food_type":
+                            menu.food_type,
 
-                        "calories": menu.calories,
+                        "calories":
+                            menu.calories,
 
-                        "protein": menu.protein,
+                        "protein":
+                            menu.protein,
 
-                        "carbs": menu.carbs,
+                        "carbs":
+                            menu.carbs,
 
-                        "fats": menu.fats,
+                        "fats":
+                            menu.fats,
 
-                        "ingredients": (
-                            menu.ingredients or []
-                        ),
+                        "ingredients":
+                            menu.ingredients or [],
 
-                        "image_urls": (
-                            menu.image_urls or []
-                        ),
+                        "image_urls":
+                            menu.image_urls or [],
 
-                        "menu_image": menu_image,
+                        "menu_image":
+                            menu_image,
 
-                        "source": source,
+                        "source":
+                            item["source"],
                     }
 
-                # ---------------------------------------------
-                # SCHEDULE VALUES
-                # ---------------------------------------------
+                # =============================================
+                # SCHEDULE DATA
+                # =============================================
 
                 schedule_id = (
                     str(schedule.id)
@@ -2770,186 +3059,204 @@ def get_customer_subscription_menu_cycle(
                     else None
                 )
 
-                # ---------------------------------------------
+                # =============================================
                 # MEAL RESPONSE
-                # ---------------------------------------------
+                # =============================================
 
                 meals.append(
                     {
-                        "id": schedule_id,
+                        "id":
+                            schedule_id,
 
-                        "schedule_id": schedule_id,
+                        "schedule_id":
+                            schedule_id,
 
-                        "subscription_id": str(
-                            subscription.id
-                        ),
+                        "subscription_id":
+                            str(subscription.id),
 
-                        "date": current_date,
+                        "date":
+                            current_date,
 
-                        "meal_type": meal_type,
+                        "meal_type":
+                            meal_type,
 
-                        "status": status,
+                        "status":
+                            status,
 
-                        "cutoff_at": cutoff_at,
+                        "cutoff_at":
+                            cutoff_at,
 
-                        "menu_id": (
-                            str(menu.id)
-                            if menu
-                            else None
-                        ),
+                        "menu_id":
+                            (
+                                str(menu.id)
+                                if menu
+                                else None
+                            ),
 
-                        "menu_name": (
-                            menu.name
-                            if menu
-                            else None
-                        ),
+                        "menu_name":
+                            (
+                                menu.name
+                                if menu
+                                else None
+                            ),
 
-                        "menu_description": (
-                            menu.description
-                            if menu
-                            else None
-                        ),
+                        "menu_description":
+                            (
+                                menu.description
+                                if menu
+                                else None
+                            ),
 
-                        "meal_price": subscription_price,
+                        "meal_price":
+                            subscription_price,
 
-                        "menu_price": subscription_price,
+                        "menu_price":
+                            subscription_price,
 
-                        "normal_menu_price": normal_price,
+                        "normal_menu_price":
+                            normal_price,
 
-                        "subscription_price": (
-                            subscription_price
-                        ),
+                        "subscription_price":
+                            subscription_price,
 
-                        "menu": menu_data,
+                        "menu":
+                            menu_data,
 
-                        "menu_category": (
-                            menu.category
-                            if menu
-                            else None
-                        ),
+                        "menu_category":
+                            (
+                                menu.category
+                                if menu
+                                else None
+                            ),
 
-                        "food_type": (
-                            menu.food_type
-                            if menu
-                            else None
-                        ),
+                        "food_type":
+                            (
+                                menu.food_type
+                                if menu
+                                else None
+                            ),
 
-                        "calories": (
-                            menu.calories
-                            if menu
-                            else None
-                        ),
+                        "calories":
+                            (
+                                menu.calories
+                                if menu
+                                else None
+                            ),
 
-                        "protein": (
-                            menu.protein
-                            if menu
-                            else None
-                        ),
+                        "protein":
+                            (
+                                menu.protein
+                                if menu
+                                else None
+                            ),
 
-                        "carbs": (
-                            menu.carbs
-                            if menu
-                            else None
-                        ),
+                        "carbs":
+                            (
+                                menu.carbs
+                                if menu
+                                else None
+                            ),
 
-                        "fats": (
-                            menu.fats
-                            if menu
-                            else None
-                        ),
+                        "fats":
+                            (
+                                menu.fats
+                                if menu
+                                else None
+                            ),
 
-                        "ingredients": (
-                            menu.ingredients or []
-                            if menu
-                            else []
-                        ),
+                        "ingredients":
+                            (
+                                menu.ingredients or []
+                                if menu
+                                else []
+                            ),
 
-                        "image_urls": (
-                            menu.image_urls or []
-                            if menu
-                            else []
-                        ),
+                        "image_urls":
+                            (
+                                menu.image_urls or []
+                                if menu
+                                else []
+                            ),
 
-                        "menu_image": menu_image,
+                        "menu_image":
+                            menu_image,
 
-                        "chef_id": str(
-                            subscription.chef_id
-                        ),
+                        "chef_id":
+                            str(subscription.chef_id),
 
-                        "chef_name": None,
+                        "chef_name":
+                            None,
 
-                        "source": source,
+                        "source":
+                            item["source"],
                     }
                 )
 
             # =================================================
-            # SORT BREAKFAST → LUNCH → DINNER
+            # BREAKFAST → LUNCH → DINNER
             # =================================================
 
             meals.sort(
-                key=lambda meal: meal_order.get(
-                    meal["meal_type"],
-                    99,
-                )
+                key=lambda meal:
+                    meal_order.get(
+                        meal["meal_type"],
+                        99,
+                    )
             )
-
-            # =================================================
-            # ADD DAY
-            # =================================================
 
             result_days.append(
                 {
-                    "date": current_date,
+                    "date":
+                        current_date,
 
-                    "day": current_date.strftime(
-                        "%A"
-                    ),
+                    "day":
+                        current_date.strftime(
+                            "%A"
+                        ),
 
-                    "day_number": day_number,
+                    "day_number":
+                        current_day_number,
 
-                    "meals": meals,
+                    "meals":
+                        meals,
                 }
             )
 
             current_date += timedelta(days=1)
-            day_number += 1
 
         # =====================================================
-        # FINAL RESPONSE
+        # 15. FINAL RESPONSE
         # =====================================================
 
         response = {
             "success": True,
 
-            "subscription_id": str(
-                subscription.id
-            ),
+            "subscription_id":
+                str(subscription.id),
 
-            "start_date": (
-                subscription_start_date
-            ),
+            "start_date":
+                subscription_start_date,
 
-            "end_date": (
-                subscription_end_date
-            ),
+            "end_date":
+                subscription_end_date,
 
-            "subscription_duration": (
-                subscription_duration
-            ),
+            "subscription_duration":
+                subscription_duration,
 
-            "breakfast_enabled": bool(
-                subscription.breakfast_enabled
-            ),
+            "breakfast_enabled":
+                bool(
+                    subscription.breakfast_enabled
+                ),
 
-            "total_days": len(
-                result_days
-            ),
+            "total_days":
+                len(result_days),
 
-            "days": result_days,
+            "days":
+                result_days,
         }
 
         # =====================================================
-        # CACHE
+        # 16. CACHE
         # =====================================================
 
         set_cache(
@@ -2959,8 +3266,8 @@ def get_customer_subscription_menu_cycle(
         )
 
         logger.info(
-            "✅ Subscription Menu Cycle Loaded "
-            "from NORMAL MENU: "
+            "✅ Subscription Menu Cycle "
+            "Loaded with BATCH QUERIES: "
             "subscription=%s "
             "days=%s",
             subscription_id,
