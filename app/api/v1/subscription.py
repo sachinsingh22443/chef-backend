@@ -3307,6 +3307,10 @@ def get_customer_subscription_menu_cycle(
 # TURN MEAL OFF
 # =========================================================
 
+# =========================================================
+# TURN MEAL OFF
+# =========================================================
+
 @router.post("/{subscription_id}/meals/{meal_type}/off")
 async def turn_meal_off(
     subscription_id: UUID,
@@ -3314,7 +3318,6 @@ async def turn_meal_off(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-
     # =====================================================
     # 1. VALIDATE MEAL TYPE
     # =====================================================
@@ -3350,14 +3353,30 @@ async def turn_meal_off(
         )
 
     # =====================================================
-    # 3. CURRENT TIME
+    # 3. BREAKFAST VALIDATION
+    # =====================================================
+
+    if (
+        meal_type == "breakfast"
+        and not subscription.breakfast_enabled
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Breakfast is not enabled "
+                "for this subscription"
+            ),
+        )
+
+    # =====================================================
+    # 4. CURRENT TIME
     # =====================================================
 
     now = datetime.now(IST)
     today = now.date()
 
     # =====================================================
-    # 4. FIND TODAY'S MEAL
+    # 5. FIND TODAY'S MEAL
     # =====================================================
 
     meal = (
@@ -3385,7 +3404,7 @@ async def turn_meal_off(
         )
 
     # =====================================================
-    # 5. CUTOFF CHECK
+    # 6. CUTOFF CHECK
     # =====================================================
 
     if now >= meal.cutoff_at:
@@ -3399,7 +3418,7 @@ async def turn_meal_off(
         )
 
     # =====================================================
-    # 6. ALREADY OFF
+    # 7. ALREADY OFF
     # =====================================================
 
     if meal.status == "off":
@@ -3418,78 +3437,53 @@ async def turn_meal_off(
         }
 
     # =====================================================
-    # 7. CALCULATE WALLET CREDIT
+    # 8. GET TODAY'S ACTUAL NORMAL MENU
     #
     # IMPORTANT:
+    # Wallet amount MUST be same as Today's Meal price.
     #
-    # Existing schedules may have meal_price = 0.
+    # Normal Menu price = ₹180
+    # Subscription price = ₹170
     #
-    # Therefore:
+    # Therefore OFF → wallet +₹170
     #
-    # 1. First use saved subscription meal_price
-    # 2. If it is 0, get the NORMAL MENU
-    # 3. Subscription price = Normal Menu price - ₹10
-    #
-    # Normal Menu is NEVER modified.
+    # meal.meal_price IS NOT USED HERE.
     # =====================================================
 
-    amount = float(
-        meal.meal_price or 0.0
+    normal_menu, source = get_menu_for_day(
+        db=db,
+        chef_id=subscription.chef_id,
+        target_date=today,
+        meal_type=meal_type,
     )
 
-    # -----------------------------------------------------
-    # FALLBACK FOR OLD / ZERO-PRICE SCHEDULES
-    # -----------------------------------------------------
-
-    if amount <= 0:
-
-        normal_menu = None
-
-        # =================================================
-        # FIRST: TRY SCHEDULE'S MENU ID
-        # =================================================
-
-        if meal.menu_id:
-
-            normal_menu = (
-                db.query(Menu)
-                .filter(
-                    Menu.id == meal.menu_id,
-                    Menu.chef_id == subscription.chef_id,
-                )
-                .first()
-            )
-
-        # =================================================
-        # SECOND: USE NORMAL MENU CYCLE
-        # =================================================
-
-        if not normal_menu:
-
-            normal_menu, _ = get_menu_for_day(
-                db=db,
-                chef_id=subscription.chef_id,
-                target_date=today,
-                meal_type=meal_type,
-            )
-
-        # =================================================
-        # CALCULATE SUBSCRIPTION PRICE
-        # =================================================
-
-        if normal_menu:
-
-            normal_menu_price = float(
-                normal_menu.price or 0.0
-            )
-
-            amount = max(
-                normal_menu_price - 10.0,
-                0.0,
-            )
+    if not normal_menu:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Today's {meal_type.title()} "
+                f"menu not found"
+            ),
+        )
 
     # =====================================================
-    # 8. SAFETY CHECK
+    # 9. CALCULATE CURRENT SUBSCRIPTION PRICE
+    #
+    # Normal Menu ₹180
+    # Subscription ₹170
+    # =====================================================
+
+    normal_menu_price = float(
+        normal_menu.price or 0.0
+    )
+
+    amount = max(
+        normal_menu_price - 10.0,
+        0.0,
+    )
+
+    # =====================================================
+    # 10. SAFETY CHECK
     # =====================================================
 
     if amount <= 0:
@@ -3497,20 +3491,20 @@ async def turn_meal_off(
             status_code=400,
             detail=(
                 f"Unable to calculate wallet credit "
-                f"for {meal_type.title()} meal."
+                f"for today's {meal_type.title()} meal."
             ),
         )
 
     try:
 
         # =================================================
-        # 9. TURN MEAL OFF
+        # 11. TURN MEAL OFF
         # =================================================
 
         meal.status = "off"
 
         # =================================================
-        # 10. CREDIT WALLET
+        # 12. CREDIT WALLET
         # =================================================
 
         credit_wallet(
@@ -3528,7 +3522,7 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 11. CUSTOMER NOTIFICATION
+        # 13. CUSTOMER NOTIFICATION
         # =================================================
 
         notification = Notification(
@@ -3546,7 +3540,7 @@ async def turn_meal_off(
         db.add(notification)
 
         # =================================================
-        # 12. CHEF NOTIFICATION
+        # 14. CHEF NOTIFICATION
         # =================================================
 
         chef_notification = Notification(
@@ -3564,14 +3558,30 @@ async def turn_meal_off(
         db.add(chef_notification)
 
         # =================================================
-        # 13. COMMIT
+        # 15. COMMIT
         # =================================================
 
         db.commit()
         db.refresh(meal)
 
         # =================================================
-        # 14. CLEAR SUBSCRIPTION CACHE
+        # 16. CLEAR TODAY CACHE
+        # =================================================
+
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        delete_cache(
+            f"subscription:today:v2:"
+            f"{subscription.id}:"
+            f"{user.id}"
+        )
+
+        # =================================================
+        # 17. CLEAR MENU CYCLE CACHE
         # =================================================
 
         delete_cache(
@@ -3599,23 +3609,7 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 15. CLEAR TODAY MEALS CACHE
-        # =================================================
-
-        delete_cache(
-            f"subscription:today:"
-            f"{subscription.id}:"
-            f"{user.id}"
-        )
-
-        delete_cache(
-            f"subscription:today:v2:"
-            f"{subscription.id}:"
-            f"{user.id}"
-        )
-
-        # =================================================
-        # 16. CLEAR SUBSCRIPTION MEALS CACHE
+        # 18. CLEAR SUBSCRIPTION MEALS CACHE
         # =================================================
 
         delete_cache(
@@ -3630,8 +3624,20 @@ async def turn_meal_off(
             f"{user.id}:True"
         )
 
+        delete_cache(
+            f"subscription:meals:v5:"
+            f"{subscription.id}:"
+            f"{user.id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:v5:"
+            f"{subscription.id}:"
+            f"{user.id}:True"
+        )
+
         # =================================================
-        # 17. WHATSAPP
+        # 19. WHATSAPP
         # =================================================
 
         try:
@@ -3652,6 +3658,7 @@ async def turn_meal_off(
             )
 
     except HTTPException:
+
         db.rollback()
         raise
 
@@ -3670,7 +3677,7 @@ async def turn_meal_off(
         )
 
     # =====================================================
-    # 18. RESPONSE
+    # 20. RESPONSE
     # =====================================================
 
     return {
@@ -3691,8 +3698,16 @@ async def turn_meal_off(
 
         "wallet_credit": amount,
 
+        "normal_menu_price": normal_menu_price,
+
+        "subscription_price": amount,
+
         "cutoff_at": meal.cutoff_at,
     }
+# =========================================================
+# TURN MEAL ON
+# =========================================================
+
 # =========================================================
 # TURN MEAL ON
 # =========================================================
@@ -3826,82 +3841,58 @@ async def turn_meal_on(
             "date": today,
             "meal_type": meal_type,
             "status": "on",
+            "wallet_debit": 0.0,
+            "cutoff_at": meal.cutoff_at,
         }
 
     # =====================================================
-    # 8. CALCULATE WALLET DEBIT
+    # 8. GET TODAY'S ACTUAL NORMAL MENU
     #
     # IMPORTANT:
+    # Wallet amount MUST be same as Today's Meal price.
     #
-    # Existing schedules may have meal_price = 0.
+    # Normal Menu price = ₹180
+    # Subscription price = ₹170
     #
-    # Therefore:
+    # Therefore ON → wallet -₹170
     #
-    # 1. First use saved subscription meal_price
-    # 2. If it is 0, get the NORMAL MENU
-    # 3. Subscription price = Normal Menu price - ₹10
-    #
-    # Normal Menu is NEVER modified.
+    # meal.meal_price IS NOT USED HERE.
     # =====================================================
 
-    amount = float(
-        meal.meal_price or 0.0
+    normal_menu, source = get_menu_for_day(
+        db=db,
+        chef_id=subscription.chef_id,
+        target_date=today,
+        meal_type=meal_type,
     )
 
-    # -----------------------------------------------------
-    # FALLBACK FOR OLD / ZERO-PRICE SCHEDULES
-    # -----------------------------------------------------
-
-    if amount <= 0:
-
-        normal_menu = None
-
-        # =================================================
-        # FIRST: TRY SCHEDULE'S MENU ID
-        # =================================================
-
-        if meal.menu_id:
-
-            normal_menu = (
-                db.query(Menu)
-                .filter(
-                    Menu.id == meal.menu_id,
-                    Menu.chef_id
-                    == subscription.chef_id,
-                )
-                .first()
-            )
-
-        # =================================================
-        # SECOND: USE NORMAL MENU CYCLE
-        # =================================================
-
-        if not normal_menu:
-
-            normal_menu, _ = get_menu_for_day(
-                db=db,
-                chef_id=subscription.chef_id,
-                target_date=today,
-                meal_type=meal_type,
-            )
-
-        # =================================================
-        # CALCULATE SUBSCRIPTION PRICE
-        # =================================================
-
-        if normal_menu:
-
-            normal_menu_price = float(
-                normal_menu.price or 0.0
-            )
-
-            amount = max(
-                normal_menu_price - 10.0,
-                0.0,
-            )
+    if not normal_menu:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Today's {meal_type.title()} "
+                f"menu not found"
+            ),
+        )
 
     # =====================================================
-    # 9. SAFETY CHECK
+    # 9. CALCULATE CURRENT SUBSCRIPTION PRICE
+    #
+    # Normal Menu ₹180
+    # Subscription ₹170
+    # =====================================================
+
+    normal_menu_price = float(
+        normal_menu.price or 0.0
+    )
+
+    amount = max(
+        normal_menu_price - 10.0,
+        0.0,
+    )
+
+    # =====================================================
+    # 10. SAFETY CHECK
     # =====================================================
 
     if amount <= 0:
@@ -3909,14 +3900,14 @@ async def turn_meal_on(
             status_code=400,
             detail=(
                 f"Unable to calculate wallet debit "
-                f"for {meal_type.title()} meal."
+                f"for today's {meal_type.title()} meal."
             ),
         )
 
     try:
 
         # =================================================
-        # 10. DEBIT WALLET
+        # 11. DEBIT WALLET
         # =================================================
 
         try:
@@ -3950,13 +3941,13 @@ async def turn_meal_on(
             )
 
         # =================================================
-        # 11. TURN MEAL ON
+        # 12. TURN MEAL ON
         # =================================================
 
         meal.status = "on"
 
         # =================================================
-        # 12. CUSTOMER NOTIFICATION
+        # 13. CUSTOMER NOTIFICATION
         # =================================================
 
         notification = Notification(
@@ -3974,7 +3965,7 @@ async def turn_meal_on(
         db.add(notification)
 
         # =================================================
-        # 13. CHEF NOTIFICATION
+        # 14. CHEF NOTIFICATION
         # =================================================
 
         chef_notification = Notification(
@@ -3992,14 +3983,14 @@ async def turn_meal_on(
         db.add(chef_notification)
 
         # =================================================
-        # 14. COMMIT
+        # 15. COMMIT
         # =================================================
 
         db.commit()
         db.refresh(meal)
 
         # =================================================
-        # 15. CLEAR TODAY CACHE
+        # 16. CLEAR TODAY CACHE
         # =================================================
 
         delete_cache(
@@ -4015,7 +4006,7 @@ async def turn_meal_on(
         )
 
         # =================================================
-        # 16. CLEAR MENU CYCLE CACHE
+        # 17. CLEAR MENU CYCLE CACHE
         # =================================================
 
         delete_cache(
@@ -4043,7 +4034,7 @@ async def turn_meal_on(
         )
 
         # =================================================
-        # 17. CLEAR SUBSCRIPTION MEALS CACHE
+        # 18. CLEAR SUBSCRIPTION MEALS CACHE
         # =================================================
 
         delete_cache(
@@ -4058,8 +4049,20 @@ async def turn_meal_on(
             f"{user.id}:True"
         )
 
+        delete_cache(
+            f"subscription:meals:v5:"
+            f"{subscription.id}:"
+            f"{user.id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:v5:"
+            f"{subscription.id}:"
+            f"{user.id}:True"
+        )
+
         # =================================================
-        # 18. WHATSAPP
+        # 19. WHATSAPP
         # =================================================
 
         try:
@@ -4099,7 +4102,7 @@ async def turn_meal_on(
         )
 
     # =====================================================
-    # 19. RESPONSE
+    # 20. RESPONSE
     # =====================================================
 
     return {
@@ -4119,6 +4122,10 @@ async def turn_meal_on(
         "status": "on",
 
         "wallet_debit": amount,
+
+        "normal_menu_price": normal_menu_price,
+
+        "subscription_price": amount,
 
         "cutoff_at": meal.cutoff_at,
     }
