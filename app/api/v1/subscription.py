@@ -4266,7 +4266,7 @@ def create_breakfast_payment(
                 status_code=400,
                 detail="No valid delivery days configured",
             )
-
+   
         # =========================================
         # COUNT REMAINING DELIVERY DAYS
         # =========================================
@@ -4725,7 +4725,27 @@ def verify_breakfast_payment(
         # =========================================
         # 14. SAVE DATABASE
         # =========================================
-
+        customer_notification = Notification(
+            user_id=user.id,
+            type="subscription",
+            title="Breakfast Added 🍳",
+            message=(
+             f"Breakfast has been added to your subscription "
+             f"for ₹{breakfast_price:.2f} per day."
+            ),
+        )
+        
+        chef_notification = Notification(
+            user_id=subscription.chef_id,
+            type="subscription",
+            title="Breakfast Add-on Received 🍳",
+            message=(
+               f"{user.name} added Breakfast to their subscription "
+               f"for ₹{breakfast_price:.2f} per day."
+            ),
+        )
+        db.add(customer_notification)
+        db.add(chef_notification)
         db.commit()
 
         db.refresh(subscription)
