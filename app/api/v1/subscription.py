@@ -5071,3 +5071,191 @@ def save_subscription_plan_menu_cycle(
         "plan_id": str(plan.id),
         "total_mappings": len(data.items),
     }
+    
+# =========================================================
+# ADMIN — GET ALL SUBSCRIPTIONS
+# =========================================================
+
+@router.get("/admin/all")
+def get_all_subscriptions_admin(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # -----------------------------------------------------
+    # ADMIN ACCESS CHECK
+    # -----------------------------------------------------
+
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required",
+        )
+
+    # -----------------------------------------------------
+    # LOAD SUBSCRIPTIONS
+    # -----------------------------------------------------
+
+    rows = (
+        db.query(
+            Subscription,
+            SubscriptionPlan,
+            User,
+        )
+        .outerjoin(
+            SubscriptionPlan,
+            SubscriptionPlan.id == Subscription.plan_id,
+        )
+        .outerjoin(
+            User,
+            User.id == Subscription.user_id,
+        )
+        .order_by(
+            Subscription.start_date.desc()
+        )
+        .all()
+    )
+
+    # -----------------------------------------------------
+    # BUILD RESPONSE
+    # -----------------------------------------------------
+
+    result = []
+
+    for subscription, plan, customer in rows:
+
+        # Exact subscription duration
+        duration_days = 0
+
+        if (
+            subscription.start_date
+            and subscription.end_date
+        ):
+            start_date = (
+                subscription.start_date.date()
+                if isinstance(
+                    subscription.start_date,
+                    datetime,
+                )
+                else subscription.start_date
+            )
+
+            end_date = (
+                subscription.end_date.date()
+                if isinstance(
+                    subscription.end_date,
+                    datetime,
+                )
+                else subscription.end_date
+            )
+
+            duration_days = (
+                end_date - start_date
+            ).days + 1
+
+        result.append(
+            {
+                "id": str(subscription.id),
+
+                # Customer
+                "customer_id": (
+                    str(subscription.user_id)
+                    if subscription.user_id
+                    else None
+                ),
+
+                "customer_name": (
+                    customer.name
+                    if customer
+                    else subscription.customer_name
+                ),
+
+                "customer_phone": (
+                    getattr(customer, "phone", None)
+                    if customer
+                    else None
+                ),
+
+                "customer_email": (
+                    getattr(customer, "email", None)
+                    if customer
+                    else None
+                ),
+
+                # Chef
+                "chef_id": (
+                    str(subscription.chef_id)
+                    if subscription.chef_id
+                    else None
+                ),
+
+                # Plan
+                "plan": (
+                    plan.title
+                    if plan
+                    else "Subscription Plan"
+                ),
+
+                "plan_type": (
+                    plan.plan_type
+                    if plan
+                    else None
+                ),
+
+                # Subscription
+                "duration_days": duration_days,
+
+                "start_date": (
+                    start_date
+                    if subscription.start_date
+                    else None
+                ),
+
+                "end_date": (
+                    end_date
+                    if subscription.end_date
+                    else None
+                ),
+
+                "status": subscription.status,
+
+                "price": float(
+                    subscription.price or 0
+                ),
+
+                # Delivery
+                "delivery_time": (
+                    subscription.delivery_time
+                ),
+
+                "delivery_days": (
+                    subscription.delivery_days or []
+                ),
+
+                # Meals
+                "meals_per_day": (
+                    subscription.meals_per_day or 0
+                ),
+
+                # Breakfast
+                "breakfast_enabled": bool(
+                    subscription.breakfast_enabled
+                ),
+
+                "breakfast_price": (
+                    float(
+                        subscription.breakfast_price or 0
+                    )
+                ),
+
+                # Diet status
+                "diet_on": (
+                    subscription.status == "active"
+                ),
+            }
+        )
+
+    return {
+        "success": True,
+        "total": len(result),
+        "subscriptions": result,
+    }
