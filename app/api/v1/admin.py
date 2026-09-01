@@ -68,9 +68,11 @@ def admin_login(
     )
 
     if not user:
+        print("ADMIN LOGIN DEBUG: USER NOT FOUND")
+        print("EMAIL RECEIVED:", repr(data.email))
         raise HTTPException(
             status_code=401,
-            detail="Invalid admin credentials",
+            detail="ADMIN_USER_NOT_FOUND",
         )
 
     # =====================================================
@@ -81,9 +83,14 @@ def admin_login(
         data.password,
         user.password,
     ):
+        print("ADMIN LOGIN DEBUG: PASSWORD FAILED")
+        print("EMAIL:", repr(data.email))
+        print("ROLE:", repr(user.role))
+        print("HASH PREFIX:", user.password[:10])
+        print("HASH LENGTH:", len(user.password))
         raise HTTPException(
             status_code=401,
-            detail="Invalid admin credentials",
+            detail="ADMIN_PASSWORD_FAILED",
         )
 
     # =====================================================
