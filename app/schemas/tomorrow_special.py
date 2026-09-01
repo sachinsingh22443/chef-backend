@@ -72,3 +72,4 @@ class TomorrowSpecialResponse(BaseModel):
 class PreOrderCreate(BaseModel):
     special_id: UUID
     quantity: int = 1
+    

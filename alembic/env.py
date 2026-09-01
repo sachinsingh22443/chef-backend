@@ -38,6 +38,7 @@ from app.models import (
     wallet_transaction,
     menu_cycle,
     menu_date_override,
+    tomorrow_special_pre_order,
 )
 # Agar cart ya address ke alag models hain jo main.py me import nahi the, unhe bhi safe side import kar lete hain:
 try:

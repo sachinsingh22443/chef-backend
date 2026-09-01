@@ -9,6 +9,12 @@ from app.api import whatsapp
 from app.db.session import engine
 from app.db.base import Base
 from app.api.v1.wallet import router as wallet_router
+from app.api.v1.admin import router as admin_router
+from app.api.v1.admin_customers import router as admin_customers_router
+from app.api.v1.admin_chefs import router as admin_chefs_router
+from app.api.v1.tomorrow_special_preorder import (
+    router as tomorrow_special_preorder_router,
+)
 # Models
 from app.models.refresh_token import RefreshToken
 from app.models import (
@@ -111,8 +117,12 @@ app.include_router(
     prefix="/menu-cycle",
     tags=["Menu Cycle"],
 )
-
-
+app.include_router(admin_router)
+app.include_router(admin_customers_router)
+app.include_router(admin_chefs_router)
+app.include_router(
+    tomorrow_special_preorder_router
+)
 # ==========================
 # Health Check
 # ==========================

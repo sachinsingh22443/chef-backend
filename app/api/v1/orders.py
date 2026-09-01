@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_
 from app.core.cache import get_cache, set_cache
 import os
+from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
 from app.core.cache import delete_cache
 from app.services.whatsapp import send_new_order_whatsapp
 from app.api.deps import get_db, get_current_user
@@ -1201,25 +1202,36 @@ async def create_order(
 
                 db.add(
                     OrderItem(
-                        order_id=order.id,
-                        special_id=special.id,
-                        quantity=item.quantity,
-                        price=price,
-                        item_name=special.dish_name,
-                        item_image=special.image_url
-                    )
+                       order_id=order.id,
+                       special_id=special.id,
+                       quantity=item.quantity,
+                       price=price,
+                       item_name=special.dish_name,
+                       item_image=special.image_url
+                     )
                 )
 
+                db.add(
+                    TomorrowSpecialPreOrder(
+                       special_id=special.id,
+                       order_id=order.id,
+                       customer_id=user.id,
+                       quantity=item.quantity,
+                       unit_price=float(special.price),
+                       total_amount=float(price),
+                    )
+                )
+                
                 created_items.append(
                     {
-                        "name": special.dish_name,
-                        "quantity": item.quantity,
-                        "price": price,
-                        "image": special.image_url,
-                        "special_id": str(
-                            special.id
-                        ),
-                        "is_tomorrow_special": True,
+                      "name": special.dish_name,
+                      "quantity": item.quantity,
+                      "price": price,
+                      "image": special.image_url,
+                      "special_id": str(
+                        special.id
+                      ),
+                      "is_tomorrow_special": True,
                     }
                 )
 
@@ -2019,6 +2031,35 @@ def update_status(
         order.refund_status = "processing"
         order.refund_amount = order.total_price
         order.refund_date = datetime.utcnow()
+
+    # =============================================
+    # 🍽️ TOMORROW SPECIAL STOCK RELEASE
+    # =============================================
+
+        tomorrow_special_items = (
+            db.query(OrderItem)
+            .filter(
+                OrderItem.order_id == order.id,
+                OrderItem.special_id.isnot(None)
+            )
+            .all()
+        )
+
+        for item in tomorrow_special_items:
+    
+            special = (
+                db.query(TomorrowSpecial)
+                .filter(
+                    TomorrowSpecial.id == item.special_id
+                )
+                .first()
+            )
+    
+            if special:
+                special.pre_orders = max(
+                    0,
+                    special.pre_orders - item.quantity
+                )
 
     # =========================
     # 💰 DELIVERED → EARNING (SAFE)

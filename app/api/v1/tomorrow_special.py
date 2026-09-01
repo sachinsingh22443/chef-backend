@@ -4,6 +4,9 @@ import cloudinary.uploader
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import logging
+from app.models.order import Order
+from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
+from app.models.order_item import OrderItem
 from app.api.deps import get_db, get_current_user
 from app.models.tomorrow_special import TomorrowSpecial
 from app.models.user import User
@@ -448,58 +451,105 @@ def get_all_specials(db: Session = Depends(get_db)):
            })
     return data
 
+# =========================================================
+# 🍱 TOMORROW SPECIAL PRE-ORDER
+# =========================================================
+
 @router.post("/pre-order")
 def create_pre_order(
     data: PreOrderCreate,
     db: Session = Depends(get_db),
-    user=Depends(get_current_user)
+    user=Depends(get_current_user),
 ):
-    special = db.query(TomorrowSpecial)\
-        .filter(TomorrowSpecial.id == data.special_id)\
-        .with_for_update()\
+    # =====================================================
+    # 🔐 CUSTOMER CHECK
+    # =====================================================
+
+    if user.role != "customer":
+        raise HTTPException(
+            status_code=403,
+            detail="Only customers can place pre-orders",
+        )
+
+    # =====================================================
+    # 🔎 LOCK SPECIAL ROW
+    # Prevent two customers from overselling plates
+    # =====================================================
+
+    special = (
+        db.query(TomorrowSpecial)
+        .filter(
+            TomorrowSpecial.id == data.special_id
+        )
+        .with_for_update()
         .first()
-        
+    )
+
     if not special:
         raise HTTPException(
-          status_code=404,
-          detail="Special not found"
+            status_code=404,
+            detail="Special not found",
         )
+
+    # =====================================================
+    # 📦 QUANTITY VALIDATION
+    # =====================================================
+
     if data.quantity <= 0:
         raise HTTPException(
-         status_code=400,
-         detail="Quantity must be at least 1"
+            status_code=400,
+            detail="Quantity must be at least 1",
         )
+
+    # =====================================================
+    # ✅ ACTIVE CHECK
+    # =====================================================
+
     if special.is_active == 0:
-        raise HTTPException(status_code=400, detail="Sold out")
+        raise HTTPException(
+            status_code=400,
+            detail="Tomorrow Special is not active",
+        )
+
+    # =====================================================
+    # 📅 DATE VALIDATION
+    # =====================================================
+
+    if not special.special_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Special date is not configured",
+        )
+
+    # =====================================================
+    # ⏰ CUTOFF VALIDATION
+    # =====================================================
+
+    if not special.cutoff_time:
+        raise HTTPException(
+            status_code=400,
+            detail="Special ordering time is not configured",
+        )
+
     try:
-        if not special.special_date:
-            raise HTTPException(
-             status_code=400,
-             detail="Special date is not configured"
-            )
-
-        if not special.cutoff_time:
-            raise HTTPException(
-             status_code=400,
-             detail="Special ordering time is not configured"
-            )
-
         cutoff_datetime = datetime.strptime(
-         f"{special.special_date} {special.cutoff_time}",
-         "%Y-%m-%d %H:%M"
+            f"{special.special_date} {special.cutoff_time}",
+            "%Y-%m-%d %H:%M",
         ).replace(
-         tzinfo=ZoneInfo("Asia/Kolkata")
+            tzinfo=ZoneInfo("Asia/Kolkata")
         )
+
         current_time = datetime.now(
-          ZoneInfo("Asia/Kolkata")
+            ZoneInfo("Asia/Kolkata")
         )
+
         if current_time >= cutoff_datetime:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                 f"Tomorrow Special ordering closed. "
-                 f"Order by {special.cutoff_time}"
-                )
+                    "Tomorrow Special ordering closed. "
+                    f"Order by {special.cutoff_time}"
+                ),
             )
 
     except HTTPException:
@@ -507,29 +557,228 @@ def create_pre_order(
 
     except Exception:
         raise HTTPException(
-         status_code=400,
-         detail="Invalid special date or cutoff time"
+            status_code=400,
+            detail="Invalid special date or cutoff time",
         )
 
-    remaining = special.max_plates - special.pre_orders
+    # =====================================================
+    # 📦 AVAILABLE PLATES
+    # =====================================================
+
+    current_pre_orders = (
+        special.pre_orders or 0
+    )
+
+    remaining = (
+        special.max_plates
+        - current_pre_orders
+    )
 
     if data.quantity > remaining:
         raise HTTPException(
-          status_code=400,
-          detail=f"Only {remaining} left"
+            status_code=400,
+            detail=f"Only {remaining} plates left",
         )
 
-    # 🔥 update
-    special.pre_orders += data.quantity
-    db.commit()
+    # =====================================================
+    # 💰 PRICE SNAPSHOT
+    # =====================================================
+
+    unit_price = float(
+        special.price
+    )
+
+    total_price = round(
+        unit_price * data.quantity,
+        2,
+    )
+
+    # =====================================================
+    # 👨‍🍳 CHEF
+    # =====================================================
+
+    chef_id = special.chef_id
+
+    if not chef_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Chef is not assigned to this special",
+        )
+
+    # =====================================================
+    # 🧾 CREATE ORDER
+    #
+    # Payment initially pending.
+    # Existing payment/COD flow can update this order.
+    # =====================================================
+
+    order = Order(
+        user_id=user.id,
+        chef_id=chef_id,
+
+        status="pending",
+
+        total_price=total_price,
+
+        created_at=datetime.utcnow(),
+
+        customer_name=user.name,
+        phone=user.phone,
+
+        # Existing Tomorrow Special endpoint
+        # does not receive address/payment method.
+        address=None,
+        payment_method="tomorrow_special",
+        payment_status="pending",
+
+        payment_id=None,
+
+        cod_confirmed=False,
+
+        refund_status="pending",
+        refund_amount=None,
+        refund_date=None,
+    )
+
+    db.add(order)
+
+    # Flush gives us order.id before creating OrderItem.
+    db.flush()
+
+    # =====================================================
+    # 🍱 CREATE ORDER ITEM
+    # =====================================================
+
+    order_item = OrderItem(
+        order_id=order.id,
+
+        menu_id=None,
+
+        special_id=special.id,
+
+        quantity=data.quantity,
+
+        price=unit_price,
+
+        item_name=special.dish_name,
+
+        item_image=special.image_url,
+
+        meal_type=None,
+
+        menu_date=special.special_date,
+    )
+    
+    pre_order = TomorrowSpecialPreOrder(
+      special_id=special.id,
+      order_id=order.id,
+      customer_id=user.id,
+      quantity=data.quantity,
+      unit_price=unit_price,
+      total_amount=total_price,
+    )
+
+    db.add(order_item)
+    db.add(pre_order)
+
+    # =====================================================
+    # 🔥 UPDATE SPECIAL COUNTER
+    # =====================================================
+
+    special.pre_orders = (
+        current_pre_orders
+        + data.quantity
+    )
+
+    # =====================================================
+    # 💾 COMMIT EVERYTHING TOGETHER
+    # =====================================================
+
+    try:
+        db.commit()
+
+    except Exception:
+        db.rollback()
+
+        logger.exception(
+            "Tomorrow Special pre-order failed"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to create pre-order",
+        )
+
+    # =====================================================
+    # 🔄 REFRESH
+    # =====================================================
+
+    db.refresh(order)
     db.refresh(special)
 
+    # =====================================================
+    # 📦 FINAL REMAINING
+    # =====================================================
+
+    final_remaining = max(
+        special.max_plates
+        - special.pre_orders,
+        0,
+    )
+
+    # =====================================================
+    # ✅ RESPONSE
+    # =====================================================
+
     return {
+        "success": True,
+
         "msg": "Pre-order successful",
-        "pre_orders": special.pre_orders,
-        "remaining": special.max_plates - special.pre_orders
+
+        "order_id": str(
+            order.id
+        ),
+
+        "special_id": str(
+            special.id
+        ),
+
+        "customer": {
+            "id": str(
+                user.id
+            ),
+
+            "name": user.name,
+
+            "phone": user.phone,
+        },
+
+        "item": {
+            "name": special.dish_name,
+
+            "quantity": data.quantity,
+
+            "unit_price": unit_price,
+
+            "total_price": total_price,
+        },
+
+        "payment": {
+            "method": order.payment_method,
+
+            "status": order.payment_status,
+
+            "payment_id": order.payment_id,
+        },
+
+        "order_status": order.status,
+
+        "pre_orders": (
+            special.pre_orders
+        ),
+
+        "remaining": final_remaining,
     }
-    
     
 from math import radians, cos, sin, asin, sqrt
 
@@ -645,3 +894,286 @@ def get_nearby_specials(
         })
 
     return result
+
+
+# =========================================================
+# 🍱 TOMORROW SPECIAL - PRE-ORDER CUSTOMERS
+# =========================================================
+
+@router.get("/pre-orders/{special_id}")
+def get_special_pre_orders(
+    special_id: UUID,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # =====================================================
+    # 🔐 ADMIN / CHEF ONLY
+    # =====================================================
+
+    if user.role not in ["admin", "chef"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin or chef can access pre-order details",
+        )
+
+    # =====================================================
+    # 🔎 GET SPECIAL
+    # =====================================================
+
+    special = (
+        db.query(TomorrowSpecial)
+        .filter(
+            TomorrowSpecial.id == special_id
+        )
+        .first()
+    )
+
+    if not special:
+        raise HTTPException(
+            status_code=404,
+            detail="Tomorrow Special not found",
+        )
+
+    # =====================================================
+    # 👨‍🍳 CHEF SECURITY
+    # Chef can only see his own special
+    # Admin can see all specials
+    # =====================================================
+
+    if user.role == "chef":
+        if special.chef_id != user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only access your own Tomorrow Special",
+            )
+
+    # =====================================================
+    # 📦 GET PRE-ORDERS
+    # =====================================================
+
+    pre_orders = (
+        db.query(TomorrowSpecialPreOrder)
+        .filter(
+            TomorrowSpecialPreOrder.special_id
+            == special_id
+        )
+        .order_by(
+            TomorrowSpecialPreOrder.created_at.desc()
+        )
+        .all()
+    )
+
+    # =====================================================
+    # 📊 SUMMARY
+    # =====================================================
+
+    total_pre_orders = len(pre_orders)
+
+    total_plates = sum(
+        p.quantity or 0
+        for p in pre_orders
+    )
+
+    total_amount = sum(
+        float(p.total_amount or 0)
+        for p in pre_orders
+    )
+
+    remaining_plates = max(
+        special.max_plates - total_plates,
+        0,
+    )
+
+    # =====================================================
+    # 👤 CUSTOMER DATA
+    # =====================================================
+
+    customers = []
+
+    for pre_order in pre_orders:
+
+        customer = pre_order.customer
+        order = pre_order.order
+
+        customers.append({
+            # =================================================
+            # 🆔 PRE-ORDER
+            # =================================================
+            "pre_order_id": str(
+                pre_order.id
+            ),
+
+            # =================================================
+            # 🍱 SPECIAL
+            # =================================================
+            "special_id": str(
+                special.id
+            ),
+
+            "dish_name": special.dish_name,
+
+            # =================================================
+            # 👤 CUSTOMER
+            # =================================================
+            "customer": {
+                "id": (
+                    str(customer.id)
+                    if customer
+                    else None
+                ),
+
+                "name": (
+                    customer.name
+                    if customer
+                    else None
+                ),
+
+                "phone": (
+                    customer.phone
+                    if customer
+                    else None
+                ),
+
+                "email": (
+                    customer.email
+                    if customer
+                    else None
+                ),
+            },
+
+            # =================================================
+            # 📦 ORDER
+            # =================================================
+            "order": {
+                "id": (
+                    str(order.id)
+                    if order
+                    else None
+                ),
+
+                "status": (
+                    order.status
+                    if order
+                    else None
+                ),
+
+                "created_at": (
+                    order.created_at.isoformat()
+                    if order and order.created_at
+                    else None
+                ),
+            },
+
+            # =================================================
+            # 🍽️ QUANTITY
+            # =================================================
+            "quantity": pre_order.quantity,
+
+            # =================================================
+            # 💰 PRICE
+            # =================================================
+            "unit_price": float(
+                pre_order.unit_price
+            ),
+
+            "total_amount": float(
+                pre_order.total_amount
+            ),
+
+            # =================================================
+            # 💳 PAYMENT
+            # =================================================
+            "payment": {
+                "method": (
+                    order.payment_method
+                    if order
+                    else None
+                ),
+
+                "status": (
+                    order.payment_status
+                    if order
+                    else None
+                ),
+
+                "payment_id": (
+                    order.payment_id
+                    if order
+                    else None
+                ),
+            },
+
+            # =================================================
+            # 🕒 PRE-ORDER CREATED
+            # =================================================
+            "created_at": (
+                pre_order.created_at.isoformat()
+                if pre_order.created_at
+                else None
+            ),
+        })
+
+    # =====================================================
+    # ✅ RESPONSE
+    # =====================================================
+
+    return {
+        "success": True,
+
+        "special": {
+            "id": str(
+                special.id
+            ),
+
+            "dish_name": special.dish_name,
+
+            "price": float(
+                special.price
+            ),
+
+            "original_price": (
+                float(special.original_price)
+                if special.original_price is not None
+                else None
+            ),
+
+            "max_plates": special.max_plates,
+
+            "pre_orders": special.pre_orders or 0,
+
+            "remaining": remaining_plates,
+
+            "special_date": (
+                special.special_date.isoformat()
+                if special.special_date
+                else None
+            ),
+
+            "cutoff_time": special.cutoff_time,
+
+            "chef_id": str(
+                special.chef_id
+            ),
+
+            "chef_name": (
+                special.chef.name
+                if special.chef
+                else "Chef"
+            ),
+        },
+
+        "summary": {
+            "total_customers": total_pre_orders,
+
+            "total_plates": total_plates,
+
+            "total_amount": round(
+                total_amount,
+                2,
+            ),
+
+            "remaining_plates": remaining_plates,
+        },
+
+        "customers": customers,
+    }
