@@ -4,6 +4,7 @@ import cloudinary.uploader
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 import logging
+from uuid import UUID
 from app.models.order import Order
 from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
 from app.models.order_item import OrderItem
