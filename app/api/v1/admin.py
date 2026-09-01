@@ -833,7 +833,7 @@ def admin_dashboard(
             TomorrowSpecial.special_date
             == tomorrow_start_india.date(),
 
-            TomorrowSpecial.is_active == True,
+            TomorrowSpecial.is_active == 1,
         )
         .all()
     )
