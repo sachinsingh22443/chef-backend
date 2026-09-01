@@ -10,12 +10,12 @@ from app.models.user import User
 from app.utils.hashing import hash_password
 
 
-def create_admin():
+def create_or_reset_admin():
     db = SessionLocal()
 
     try:
         print("\n================================")
-        print("      CREATE ADMIN ACCOUNT")
+        print("      CREATE / RESET ADMIN")
         print("================================\n")
 
         name = input("Admin name: ").strip()
@@ -55,21 +55,61 @@ def create_admin():
             .first()
         )
 
+        # =========================================
+        # EXISTING USER
+        # =========================================
+
         if existing_user:
 
+            # -------------------------------------
+            # EXISTING ADMIN
+            # -------------------------------------
+
             if existing_user.role == "admin":
-                print("❌ Admin account already exists")
+
+                print("\n⚠️ Admin account already exists.")
+                print("Updating admin password...\n")
+
+                existing_user.name = name
+                existing_user.phone = phone or None
+
+                # IMPORTANT:
+                # Generate a completely new Argon2id hash
+                existing_user.password = hash_password(password)
+
+                existing_user.role = "admin"
+                existing_user.is_active = True
+                existing_user.is_verified = True
+                existing_user.application_status = "approved"
+
+                db.commit()
+                db.refresh(existing_user)
+
+                print("================================")
+                print("✅ ADMIN PASSWORD RESET SUCCESS")
+                print("================================")
+                print(f"Name : {existing_user.name}")
+                print(f"Email: {existing_user.email}")
+                print(f"Role : {existing_user.role}")
+                print(f"ID   : {existing_user.id}")
+                print("================================\n")
+
                 return
+
+            # -------------------------------------
+            # EMAIL BELONGS TO NON-ADMIN
+            # -------------------------------------
 
             print(
                 f"❌ This email already belongs to "
                 f"a {existing_user.role} account."
             )
+
             return
 
-        # -----------------------------------------
-        # CREATE ADMIN
-        # -----------------------------------------
+        # =========================================
+        # CREATE NEW ADMIN
+        # =========================================
 
         admin = User(
             name=name,
@@ -83,6 +123,7 @@ def create_admin():
         )
 
         db.add(admin)
+
         db.commit()
         db.refresh(admin)
 
@@ -96,12 +137,15 @@ def create_admin():
         print("================================\n")
 
     except Exception as e:
+
         db.rollback()
+
         print("\n❌ ERROR:", str(e))
 
     finally:
+
         db.close()
 
 
 if __name__ == "__main__":
-    create_admin()
+    create_or_reset_admin()
