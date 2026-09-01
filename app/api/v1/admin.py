@@ -8,6 +8,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, aliased
 from app.models.tomorrow_special import TomorrowSpecial
 from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
+from app.models.subscription_meal_schedule import SubscriptionMealSchedule
 
 from app.models.user import User
 from app.models.order import Order
@@ -267,6 +268,10 @@ def check_admin_access(
 # ADMIN DASHBOARD
 # =========================================================
 
+# =========================================================
+# ADMIN DASHBOARD
+# =========================================================
+
 @router.get("/dashboard")
 def admin_dashboard(
     db: Session = Depends(get_db),
@@ -274,6 +279,7 @@ def admin_dashboard(
         require_role(["admin"])
     ),
 ):
+
     # =====================================================
     # INDIA TODAY
     # =====================================================
@@ -296,7 +302,7 @@ def admin_dashboard(
     )
 
     # =====================================================
-    # UTC-NAIVE BOUNDARIES FOR ORDER TABLE
+    # UTC-NAIVE BOUNDARIES
     # =====================================================
 
     today_start_utc = (
@@ -379,7 +385,7 @@ def admin_dashboard(
     )
 
     # =====================================================
-    # DELIVERED / COMPLETED
+    # DELIVERED
     # =====================================================
 
     delivered_orders = (
@@ -512,11 +518,357 @@ def admin_dashboard(
     )
 
     # =====================================================
+    # PAYMENT BREAKDOWN
+    # =====================================================
+
+    cod_orders = (
+        db.query(func.count(Order.id))
+        .filter(
+            Order.created_at >= today_start_utc,
+            Order.created_at < tomorrow_start_utc,
+            Order.status != "cancelled",
+            func.lower(
+                func.coalesce(
+                    Order.payment_method,
+                    ""
+                )
+            ) == "cod",
+        )
+        .scalar()
+        or 0
+    )
+
+    upi_orders = (
+        db.query(func.count(Order.id))
+        .filter(
+            Order.created_at >= today_start_utc,
+            Order.created_at < tomorrow_start_utc,
+            Order.status != "cancelled",
+            func.lower(
+                func.coalesce(
+                    Order.payment_method,
+                    ""
+                )
+            ).in_(
+                [
+                    "upi",
+                    "online",
+                    "razorpay",
+                ]
+            ),
+        )
+        .scalar()
+        or 0
+    )
+
+    card_orders = (
+        db.query(func.count(Order.id))
+        .filter(
+            Order.created_at >= today_start_utc,
+            Order.created_at < tomorrow_start_utc,
+            Order.status != "cancelled",
+            func.lower(
+                func.coalesce(
+                    Order.payment_method,
+                    ""
+                )
+            ).in_(
+                [
+                    "card",
+                    "credit_card",
+                    "debit_card",
+                ]
+            ),
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # RECENT ORDERS
+    # =====================================================
+
+    recent_order_rows = (
+        db.query(Order)
+        .order_by(
+            Order.created_at.desc()
+        )
+        .limit(5)
+        .all()
+    )
+
+    recent_orders = []
+
+    for recent_order in recent_order_rows:
+
+        created_at_ist = None
+
+        if recent_order.created_at:
+
+            if recent_order.created_at.tzinfo is None:
+
+                created_at_ist = (
+                    recent_order.created_at
+                    .replace(
+                        tzinfo=utc_tz
+                    )
+                    .astimezone(
+                        india_tz
+                    )
+                )
+
+            else:
+
+                created_at_ist = (
+                    recent_order.created_at
+                    .astimezone(
+                        india_tz
+                    )
+                )
+
+        # -------------------------------------------------
+        # FIRST ITEM
+        # -------------------------------------------------
+
+        first_item_name = "Order"
+
+        if recent_order.items:
+
+            first_item_name = (
+                recent_order.items[0].item_name
+                or "Order"
+            )
+
+        # -------------------------------------------------
+        # CUSTOMER NAME
+        # -------------------------------------------------
+
+        customer_name = (
+            recent_order.customer_name
+            or "Customer"
+        )
+
+        recent_orders.append(
+            {
+                "id": str(
+                    recent_order.id
+                ),
+
+                "customer": customer_name,
+
+                "item": first_item_name,
+
+                "amount": (
+                    round(
+                        float(
+                            recent_order.total_price
+                            or 0
+                        ),
+                        2,
+                    )
+                ),
+
+                "status": (
+                    recent_order.status
+                ),
+
+                "payment_method": (
+                    recent_order.payment_method
+                ),
+
+                "time": (
+                    created_at_ist.strftime(
+                        "%d %b, %I:%M %p"
+                    )
+                    if created_at_ist
+                    else "-"
+                ),
+            }
+        )
+
+    # =====================================================
+    # TOMORROW SPECIAL
+    # =====================================================
+
+    tomorrow_specials = (
+        db.query(TomorrowSpecial)
+        .filter(
+            TomorrowSpecial.special_date
+            == tomorrow_start_india.date(),
+
+            TomorrowSpecial.is_active == True,
+        )
+        .all()
+    )
+
+    tomorrow_special_preorders = 0
+
+    tomorrow_special_plates = 0
+
+    tomorrow_special_max_plates = 0
+
+    tomorrow_special_remaining = 0
+
+    for special in tomorrow_specials:
+
+        # -------------------------------------------------
+        # MAX PLATES
+        # -------------------------------------------------
+
+        tomorrow_special_max_plates += (
+            special.max_plates or 0
+        )
+
+        # -------------------------------------------------
+        # PRE-ORDER COUNT
+        # -------------------------------------------------
+
+        preorder_count = (
+            db.query(
+                func.count(
+                    TomorrowSpecialPreOrder.id
+                )
+            )
+            .filter(
+                TomorrowSpecialPreOrder.special_id
+                == special.id
+            )
+            .scalar()
+            or 0
+        )
+
+        tomorrow_special_preorders += (
+            preorder_count
+        )
+
+        # -------------------------------------------------
+        # PLATES BOOKED
+        # -------------------------------------------------
+
+        booked_plates = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        TomorrowSpecialPreOrder.quantity
+                    ),
+                    0,
+                )
+            )
+            .filter(
+                TomorrowSpecialPreOrder.special_id
+                == special.id
+            )
+            .scalar()
+            or 0
+        )
+
+        tomorrow_special_plates += int(
+            booked_plates
+        )
+
+        # -------------------------------------------------
+        # REMAINING
+        # -------------------------------------------------
+
+        remaining_for_special = max(
+            (
+                special.max_plates or 0
+            )
+            - int(booked_plates),
+            0,
+        )
+
+        tomorrow_special_remaining += (
+            remaining_for_special
+        )
+
+    # =====================================================
+    # TODAY'S DIET STATUS
+    # =====================================================
+
+    diet_on = (
+        db.query(
+            func.count(
+                func.distinct(
+                    SubscriptionMealSchedule.subscription_id
+                )
+            )
+        )
+        .join(
+            Subscription,
+            Subscription.id
+            == SubscriptionMealSchedule.subscription_id,
+        )
+        .filter(
+            Subscription.status == "active",
+
+            SubscriptionMealSchedule.date
+            == now_india.date(),
+
+            SubscriptionMealSchedule.status == "on",
+        )
+        .scalar()
+        or 0
+    )
+
+    diet_off = (
+        db.query(
+            func.count(
+                func.distinct(
+                    SubscriptionMealSchedule.subscription_id
+                )
+            )
+        )
+        .join(
+            Subscription,
+            Subscription.id
+            == SubscriptionMealSchedule.subscription_id,
+        )
+        .filter(
+            Subscription.status == "active",
+
+            SubscriptionMealSchedule.date
+            == now_india.date(),
+
+            SubscriptionMealSchedule.status == "off",
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # SUBSCRIPTIONS EXPIRING IN NEXT 7 DAYS
+    # =====================================================
+
+    expiring_soon = (
+        db.query(
+            func.count(
+                Subscription.id
+            )
+        )
+        .filter(
+            Subscription.status == "active",
+
+            Subscription.end_date >= now_india,
+
+            Subscription.end_date
+            <= now_india + timedelta(days=7),
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
     # RESPONSE
     # =====================================================
 
     return {
+
         "success": True,
+
+        # -------------------------------------------------
+        # DATE / TIME
+        # -------------------------------------------------
 
         "date": now_india.strftime(
             "%d %b %Y"
@@ -526,45 +878,154 @@ def admin_dashboard(
             "%I:%M %p"
         ),
 
+        # -------------------------------------------------
+        # ORDERS
+        # -------------------------------------------------
+
         "orders": {
+
             "total": total_orders,
+
             "today": todays_orders,
+
             "pending": pending_orders,
+
             "preparing": preparing_orders,
-            "out_for_delivery": out_for_delivery_orders,
-            "delivered": delivered_orders,
-            "completed": delivered_orders,
-            "cancelled": cancelled_orders,
+
+            "out_for_delivery":
+                out_for_delivery_orders,
+
+            "delivered":
+                delivered_orders,
+
+            "completed":
+                delivered_orders,
+
+            "cancelled":
+                cancelled_orders,
         },
 
+        # -------------------------------------------------
+        # REVENUE
+        # -------------------------------------------------
+
         "revenue": {
+
             "today": round(
                 float(todays_revenue),
                 2,
             ),
+
             "total": round(
                 float(total_revenue),
                 2,
             ),
         },
 
+        # -------------------------------------------------
+        # CUSTOMERS
+        # -------------------------------------------------
+
         "customers": {
-            "total": total_customers,
-            "active": active_customers,
+
+            "total":
+                total_customers,
+
+            "active":
+                active_customers,
         },
+
+        # -------------------------------------------------
+        # CHEFS
+        # -------------------------------------------------
 
         "chefs": {
-            "total": total_chefs,
-            "active": active_chefs,
+
+            "total":
+                total_chefs,
+
+            "active":
+                active_chefs,
         },
+
+        # -------------------------------------------------
+        # SUBSCRIPTIONS
+        # -------------------------------------------------
 
         "subscriptions": {
-            "active": active_subscriptions,
-            "today": todays_subscriptions,
+
+            "active":
+                active_subscriptions,
+
+            "today":
+                todays_subscriptions,
+        },
+
+        # -------------------------------------------------
+        # PAYMENT BREAKDOWN
+        # -------------------------------------------------
+
+        "payments": {
+
+            "cod":
+                cod_orders,
+
+            "upi":
+                upi_orders,
+
+            "card":
+                card_orders,
+        },
+
+        # -------------------------------------------------
+        # RECENT ORDERS
+        # -------------------------------------------------
+
+        "recent_orders":
+            recent_orders,
+
+        # -------------------------------------------------
+        # TOMORROW SPECIAL
+        # -------------------------------------------------
+
+        "tomorrow_special": {
+
+            "preorders":
+                tomorrow_special_preorders,
+
+            "plates":
+                tomorrow_special_plates,
+
+            "max_plates":
+                tomorrow_special_max_plates,
+
+            "remaining":
+                tomorrow_special_remaining,
+        },
+
+        # -------------------------------------------------
+        # DIET STATUS
+        # -------------------------------------------------
+
+        "diet": {
+
+            "on":
+                diet_on,
+
+            "off":
+                diet_off,
+        },
+
+        # -------------------------------------------------
+        # EXTRA SUBSCRIPTION INFO
+        # -------------------------------------------------
+
+        "subscription_extra": {
+
+            "expiring_soon":
+                expiring_soon,
         },
     }
-
-
 # =========================================================
 # ADMIN ORDERS
 #
