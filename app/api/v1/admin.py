@@ -53,70 +53,134 @@ def admin_login(
     data: AdminLoginSchema,
     db: Session = Depends(get_db),
 ):
-    # =====================================================
-    # FIND ADMIN
-    # =====================================================
+    print("\n================ ADMIN LOGIN DEBUG ================")
+    print("EMAIL RECEIVED:", repr(data.email))
+    print("EMAIL LOWER:", repr(data.email.lower()))
+    print("EMAIL LENGTH:", len(data.email))
 
+    # -------------------------------------------------
+    # DATABASE IDENTITY
+    # -------------------------------------------------
+    try:
+        from sqlalchemy import text
+
+        db_info = db.execute(
+            text("""
+                SELECT
+                    current_database() AS database_name,
+                    current_schema() AS schema_name,
+                    current_user AS database_user
+            """)
+        ).mappings().first()
+
+        print("DATABASE:", db_info)
+    except Exception as e:
+        print("DATABASE DEBUG ERROR:", repr(e))
+
+    # -------------------------------------------------
+    # FIND BY EMAIL ONLY
+    # -------------------------------------------------
+    try:
+        email_user = (
+            db.query(User)
+            .filter(
+                func.lower(func.trim(User.email))
+                == data.email.strip().lower()
+            )
+            .first()
+        )
+
+        print(
+            "EMAIL USER:",
+            {
+                "found": bool(email_user),
+                "id": str(email_user.id) if email_user else None,
+                "email": email_user.email if email_user else None,
+                "role": email_user.role if email_user else None,
+                "active": email_user.is_active if email_user else None,
+            }
+        )
+
+    except Exception as e:
+        print("EMAIL QUERY ERROR:", repr(e))
+        raise
+
+    # -------------------------------------------------
+    # FIND ADMIN
+    # -------------------------------------------------
     user = (
         db.query(User)
         .filter(
-            User.email == data.email,
+            func.lower(func.trim(User.email))
+            == data.email.strip().lower(),
             User.role == "admin",
         )
-        .limit(1)
         .first()
     )
 
+    print(
+        "ADMIN USER:",
+        {
+            "found": bool(user),
+            "id": str(user.id) if user else None,
+            "email": user.email if user else None,
+            "role": user.role if user else None,
+            "active": user.is_active if user else None,
+        }
+    )
+
+    # -------------------------------------------------
+    # USER NOT FOUND
+    # -------------------------------------------------
     if not user:
         print("ADMIN LOGIN DEBUG: USER NOT FOUND")
-        print("EMAIL RECEIVED:", repr(data.email))
+        print("===================================================\n")
+
         raise HTTPException(
             status_code=401,
             detail="ADMIN_USER_NOT_FOUND",
         )
 
-    # =====================================================
+    # -------------------------------------------------
     # PASSWORD
-    # =====================================================
-
-    if not verify_password(
+    # -------------------------------------------------
+    password_valid = verify_password(
         data.password,
         user.password,
-    ):
-        print("ADMIN LOGIN DEBUG: PASSWORD FAILED")
-        print("EMAIL:", repr(data.email))
-        print("ROLE:", repr(user.role))
-        print("HASH PREFIX:", user.password[:10])
-        print("HASH LENGTH:", len(user.password))
+    )
+
+    print("PASSWORD VALID:", password_valid)
+
+    if not password_valid:
+        print("ADMIN LOGIN DEBUG: PASSWORD INVALID")
+        print("===================================================\n")
+
         raise HTTPException(
             status_code=401,
-            detail="ADMIN_PASSWORD_FAILED",
+            detail="INVALID_ADMIN_PASSWORD",
         )
 
-    # =====================================================
-    # ACTIVE CHECK
-    # =====================================================
-
+    # -------------------------------------------------
+    # ACTIVE
+    # -------------------------------------------------
     if not user.is_active:
         raise HTTPException(
             status_code=403,
             detail="Admin account is disabled",
         )
 
-    # =====================================================
-    # ROLE CHECK
-    # =====================================================
-
+    # -------------------------------------------------
+    # ROLE
+    # -------------------------------------------------
     if user.role != "admin":
         raise HTTPException(
             status_code=403,
             detail="Admin access required",
         )
 
-    # =====================================================
+    # -------------------------------------------------
     # ACCESS TOKEN
-    # =====================================================
-
+    # -------------------------------------------------
     access_token = create_access_token(
         {
             "sub": str(user.id),
@@ -124,10 +188,9 @@ def admin_login(
         }
     )
 
-    # =====================================================
+    # -------------------------------------------------
     # REFRESH TOKEN
-    # =====================================================
-
+    # -------------------------------------------------
     refresh_token = create_refresh_token(
         {
             "sub": str(user.id),
@@ -135,9 +198,9 @@ def admin_login(
         }
     )
 
-    # =====================================================
-    # RESPONSE
-    # =====================================================
+    print("ADMIN LOGIN SUCCESS")
+    print("ADMIN ID:", user.id)
+    print("===================================================\n")
 
     return {
         "access_token": access_token,
