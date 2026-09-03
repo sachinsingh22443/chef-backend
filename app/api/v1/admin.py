@@ -1179,6 +1179,566 @@ def admin_dashboard(
 # - Refund information
 # - Order time
 # =========================================================
+# =========================================================
+# 📊 ADMIN ANALYTICS
+# =========================================================
+#
+# Premium business analytics API
+#
+# FEATURES:
+# - Revenue summary
+# - Orders summary
+# - Customers summary
+# - Active subscriptions
+# - Daily revenue trend
+# - Daily orders trend
+# - Order status breakdown
+# - Payment method breakdown
+# - Subscription trend
+# - Date range support
+#
+# =========================================================
+
+
+@router.get("/analytics")
+def admin_analytics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_role(["admin"])
+    ),
+    days: int = Query(
+        30,
+        ge=7,
+        le=365,
+        description="Analytics period in days",
+    ),
+):
+    # =====================================================
+    # TIMEZONE
+    # =====================================================
+
+    india_tz = ZoneInfo("Asia/Kolkata")
+    utc_tz = ZoneInfo("UTC")
+
+    now_india = datetime.now(india_tz)
+
+    # Current period
+    period_start_india = (
+        now_india
+        - timedelta(days=days - 1)
+    ).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    period_end_india = (
+        now_india
+        + timedelta(days=1)
+    ).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    period_start_utc = (
+        period_start_india
+        .astimezone(utc_tz)
+        .replace(tzinfo=None)
+    )
+
+    period_end_utc = (
+        period_end_india
+        .astimezone(utc_tz)
+        .replace(tzinfo=None)
+    )
+
+    # =====================================================
+    # PREVIOUS PERIOD
+    # =====================================================
+
+    previous_period_end_india = period_start_india
+
+    previous_period_start_india = (
+        previous_period_end_india
+        - timedelta(days=days)
+    )
+
+    previous_period_start_utc = (
+        previous_period_start_india
+        .astimezone(utc_tz)
+        .replace(tzinfo=None)
+    )
+
+    previous_period_end_utc = (
+        previous_period_end_india
+        .astimezone(utc_tz)
+        .replace(tzinfo=None)
+    )
+
+    # =====================================================
+    # CURRENT ORDERS
+    # =====================================================
+
+    current_orders_query = (
+        db.query(Order)
+        .filter(
+            Order.created_at >= period_start_utc,
+            Order.created_at < period_end_utc,
+            Order.status != "cancelled",
+        )
+    )
+
+    current_orders = current_orders_query.all()
+
+    # =====================================================
+    # PREVIOUS ORDERS
+    # =====================================================
+
+    previous_orders_count = (
+        db.query(func.count(Order.id))
+        .filter(
+            Order.created_at >= previous_period_start_utc,
+            Order.created_at < previous_period_end_utc,
+            Order.status != "cancelled",
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # CURRENT REVENUE
+    # =====================================================
+
+    current_revenue = (
+        db.query(
+            func.coalesce(
+                func.sum(Order.total_price),
+                0,
+            )
+        )
+        .filter(
+            Order.created_at >= period_start_utc,
+            Order.created_at < period_end_utc,
+            Order.status != "cancelled",
+        )
+        .scalar()
+        or 0
+    )
+
+    current_revenue = float(
+        current_revenue
+    )
+
+    # =====================================================
+    # PREVIOUS REVENUE
+    # =====================================================
+
+    previous_revenue = (
+        db.query(
+            func.coalesce(
+                func.sum(Order.total_price),
+                0,
+            )
+        )
+        .filter(
+            Order.created_at >= previous_period_start_utc,
+            Order.created_at < previous_period_end_utc,
+            Order.status != "cancelled",
+        )
+        .scalar()
+        or 0
+    )
+
+    previous_revenue = float(
+        previous_revenue
+    )
+
+    # =====================================================
+    # ORDER COUNT
+    # =====================================================
+
+    current_orders_count = len(
+        current_orders
+    )
+
+    # =====================================================
+    # AVERAGE ORDER VALUE
+    # =====================================================
+
+    average_order_value = (
+        current_revenue / current_orders_count
+        if current_orders_count > 0
+        else 0
+    )
+
+    # =====================================================
+    # GROWTH CALCULATOR
+    # =====================================================
+
+    def calculate_growth(
+        current_value,
+        previous_value,
+    ):
+        if previous_value == 0:
+            if current_value == 0:
+                return 0.0
+            return 100.0
+
+        return round(
+            (
+                (
+                    current_value
+                    - previous_value
+                )
+                / previous_value
+            )
+            * 100,
+            2,
+        )
+
+    revenue_growth = calculate_growth(
+        current_revenue,
+        previous_revenue,
+    )
+
+    orders_growth = calculate_growth(
+        current_orders_count,
+        previous_orders_count,
+    )
+
+    # =====================================================
+    # CUSTOMER SUMMARY
+    # =====================================================
+
+    total_customers = (
+        db.query(func.count(User.id))
+        .filter(
+            User.role == "customer"
+        )
+        .scalar()
+        or 0
+    )
+
+    active_customers = (
+        db.query(func.count(User.id))
+        .filter(
+            User.role == "customer",
+            User.is_active == True,
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # NEW CUSTOMERS IN PERIOD
+    # =====================================================
+
+    new_customers = (
+        db.query(func.count(User.id))
+        .filter(
+            User.role == "customer",
+            User.created_at >= period_start_utc,
+            User.created_at < period_end_utc,
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # SUBSCRIPTIONS
+    # =====================================================
+
+    active_subscriptions = (
+        db.query(func.count(Subscription.id))
+        .filter(
+            Subscription.status == "active",
+        )
+        .scalar()
+        or 0
+    )
+
+    new_subscriptions = (
+        db.query(func.count(Subscription.id))
+        .filter(
+            Subscription.created_at >= period_start_utc,
+            Subscription.created_at < period_end_utc,
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # ORDER STATUS BREAKDOWN
+    # =====================================================
+
+    status_summary = {
+        "pending": 0,
+        "preparing": 0,
+        "out_for_delivery": 0,
+        "delivered": 0,
+        "cancelled": 0,
+    }
+
+    status_rows = (
+        db.query(
+            Order.status,
+            func.count(Order.id),
+        )
+        .filter(
+            Order.created_at >= period_start_utc,
+            Order.created_at < period_end_utc,
+        )
+        .group_by(Order.status)
+        .all()
+    )
+
+    for order_status, count in status_rows:
+        if order_status in status_summary:
+            status_summary[
+                order_status
+            ] = int(count)
+
+    # =====================================================
+    # PAYMENT BREAKDOWN
+    # =====================================================
+
+    payment_summary = {
+        "cod": 0,
+        "upi": 0,
+        "card": 0,
+        "other": 0,
+    }
+
+    payment_rows = (
+        db.query(
+            Order.payment_method,
+            func.count(Order.id),
+        )
+        .filter(
+            Order.created_at >= period_start_utc,
+            Order.created_at < period_end_utc,
+            Order.status != "cancelled",
+        )
+        .group_by(Order.payment_method)
+        .all()
+    )
+
+    for payment_method, count in payment_rows:
+
+        method = (
+            str(payment_method)
+            .strip()
+            .lower()
+            if payment_method
+            else "other"
+        )
+
+        if method == "cod":
+            payment_summary["cod"] += int(count)
+
+        elif method in {
+            "upi",
+            "online",
+            "razorpay",
+        }:
+            payment_summary["upi"] += int(count)
+
+        elif method in {
+            "card",
+            "credit_card",
+            "debit_card",
+        }:
+            payment_summary["card"] += int(count)
+
+        else:
+            payment_summary["other"] += int(count)
+
+    # =====================================================
+    # DAILY TREND
+    # =====================================================
+
+    daily = {}
+
+    for index in range(days):
+
+        date_value = (
+            period_start_india
+            + timedelta(days=index)
+        ).date()
+
+        key = date_value.isoformat()
+
+        daily[key] = {
+            "date": key,
+            "label": date_value.strftime(
+                "%d %b"
+            ),
+            "orders": 0,
+            "revenue": 0.0,
+        }
+
+    # =====================================================
+    # BUILD DAILY ORDER / REVENUE TREND
+    # =====================================================
+
+    for order in current_orders:
+
+        created_at = order.created_at
+
+        if not created_at:
+            continue
+
+        if created_at.tzinfo is None:
+            created_at_india = (
+                created_at
+                .replace(tzinfo=utc_tz)
+                .astimezone(india_tz)
+            )
+        else:
+            created_at_india = (
+                created_at.astimezone(
+                    india_tz
+                )
+            )
+
+        date_key = (
+            created_at_india.date()
+            .isoformat()
+        )
+
+        if date_key not in daily:
+            continue
+
+        daily[date_key]["orders"] += 1
+
+        daily[date_key]["revenue"] += float(
+            order.total_price or 0
+        )
+
+    daily_trend = list(
+        daily.values()
+    )
+
+    for item in daily_trend:
+        item["revenue"] = round(
+            item["revenue"],
+            2,
+        )
+
+    # =====================================================
+    # BEST DAY
+    # =====================================================
+
+    best_revenue_day = None
+
+    if daily_trend:
+
+        best_revenue_day = max(
+            daily_trend,
+            key=lambda item: item["revenue"],
+        )
+
+    # =====================================================
+    # PERIOD START / END
+    # =====================================================
+
+    return {
+        "success": True,
+
+        "period": {
+            "days": days,
+            "start": period_start_india.strftime(
+                "%Y-%m-%d"
+            ),
+            "end": (
+                period_end_india
+                - timedelta(days=1)
+            ).strftime(
+                "%Y-%m-%d"
+            ),
+            "generated_at": now_india.isoformat(),
+        },
+
+        "overview": {
+            "revenue": round(
+                current_revenue,
+                2,
+            ),
+
+            "revenue_growth": revenue_growth,
+
+            "orders": current_orders_count,
+
+            "orders_growth": orders_growth,
+
+            "average_order_value": round(
+                average_order_value,
+                2,
+            ),
+
+            "customers": total_customers,
+
+            "active_customers": active_customers,
+
+            "new_customers": new_customers,
+
+            "active_subscriptions":
+                active_subscriptions,
+
+            "new_subscriptions":
+                new_subscriptions,
+        },
+
+        "orders": {
+            "total": current_orders_count,
+
+            "pending":
+                status_summary["pending"],
+
+            "preparing":
+                status_summary["preparing"],
+
+            "out_for_delivery":
+                status_summary[
+                    "out_for_delivery"
+                ],
+
+            "delivered":
+                status_summary["delivered"],
+
+            "cancelled":
+                status_summary["cancelled"],
+        },
+
+        "revenue": {
+            "current": round(
+                current_revenue,
+                2,
+            ),
+
+            "previous": round(
+                previous_revenue,
+                2,
+            ),
+
+            "growth": revenue_growth,
+        },
+
+        "status_breakdown": status_summary,
+
+        "payment_breakdown":
+            payment_summary,
+
+        "daily_trend":
+            daily_trend,
+
+        "best_day":
+            best_revenue_day,
+    }
+
 
 @router.get("/orders")
 def admin_orders(
