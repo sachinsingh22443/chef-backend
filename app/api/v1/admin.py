@@ -1200,12 +1200,46 @@ def admin_dashboard(
 # =========================================================
 
 
+# =========================================================
+# 📊 ADMIN ANALYTICS
+# =========================================================
+#
+# Premium business analytics API
+#
+# FEATURES:
+# - Revenue summary
+# - Orders summary
+# - Customers summary
+# - Chef summary
+# - Chef performance
+# - Active subscriptions
+# - New subscriptions
+# - Subscription health
+# - Daily revenue trend
+# - Daily orders trend
+# - Order status breakdown
+# - Payment method breakdown
+# - Diet ON / OFF
+# - Tomorrow Special
+# - Tomorrow Special pre-orders
+# - Tomorrow Special plates
+# - Tomorrow Special capacity
+# - Tomorrow Special revenue
+# - Best day
+# - Best chef
+# - Date range support
+#
+# =========================================================
+
+
 @router.get("/analytics")
 def admin_analytics(
     db: Session = Depends(get_db),
+
     current_user: User = Depends(
         require_role(["admin"])
     ),
+
     days: int = Query(
         30,
         ge=7,
@@ -1213,6 +1247,7 @@ def admin_analytics(
         description="Analytics period in days",
     ),
 ):
+
     # =====================================================
     # TIMEZONE
     # =====================================================
@@ -1222,7 +1257,10 @@ def admin_analytics(
 
     now_india = datetime.now(india_tz)
 
-    # Current period
+    # =====================================================
+    # CURRENT PERIOD
+    # =====================================================
+
     period_start_india = (
         now_india
         - timedelta(days=days - 1)
@@ -1259,7 +1297,9 @@ def admin_analytics(
     # PREVIOUS PERIOD
     # =====================================================
 
-    previous_period_end_india = period_start_india
+    previous_period_end_india = (
+        period_start_india
+    )
 
     previous_period_start_india = (
         previous_period_end_india
@@ -1291,17 +1331,26 @@ def admin_analytics(
         )
     )
 
-    current_orders = current_orders_query.all()
+    current_orders = (
+        current_orders_query
+        .all()
+    )
 
     # =====================================================
     # PREVIOUS ORDERS
     # =====================================================
 
     previous_orders_count = (
-        db.query(func.count(Order.id))
+        db.query(
+            func.count(Order.id)
+        )
         .filter(
-            Order.created_at >= previous_period_start_utc,
-            Order.created_at < previous_period_end_utc,
+            Order.created_at >= (
+                previous_period_start_utc
+            ),
+            Order.created_at < (
+                previous_period_end_utc
+            ),
             Order.status != "cancelled",
         )
         .scalar()
@@ -1315,7 +1364,9 @@ def admin_analytics(
     current_revenue = (
         db.query(
             func.coalesce(
-                func.sum(Order.total_price),
+                func.sum(
+                    Order.total_price
+                ),
                 0,
             )
         )
@@ -1339,13 +1390,19 @@ def admin_analytics(
     previous_revenue = (
         db.query(
             func.coalesce(
-                func.sum(Order.total_price),
+                func.sum(
+                    Order.total_price
+                ),
                 0,
             )
         )
         .filter(
-            Order.created_at >= previous_period_start_utc,
-            Order.created_at < previous_period_end_utc,
+            Order.created_at >= (
+                previous_period_start_utc
+            ),
+            Order.created_at < (
+                previous_period_end_utc
+            ),
             Order.status != "cancelled",
         )
         .scalar()
@@ -1369,7 +1426,8 @@ def admin_analytics(
     # =====================================================
 
     average_order_value = (
-        current_revenue / current_orders_count
+        current_revenue
+        / current_orders_count
         if current_orders_count > 0
         else 0
     )
@@ -1382,9 +1440,12 @@ def admin_analytics(
         current_value,
         previous_value,
     ):
+
         if previous_value == 0:
+
             if current_value == 0:
                 return 0.0
+
             return 100.0
 
         return round(
@@ -1399,14 +1460,18 @@ def admin_analytics(
             2,
         )
 
-    revenue_growth = calculate_growth(
-        current_revenue,
-        previous_revenue,
+    revenue_growth = (
+        calculate_growth(
+            current_revenue,
+            previous_revenue,
+        )
     )
 
-    orders_growth = calculate_growth(
-        current_orders_count,
-        previous_orders_count,
+    orders_growth = (
+        calculate_growth(
+            current_orders_count,
+            previous_orders_count,
+        )
     )
 
     # =====================================================
@@ -1414,7 +1479,9 @@ def admin_analytics(
     # =====================================================
 
     total_customers = (
-        db.query(func.count(User.id))
+        db.query(
+            func.count(User.id)
+        )
         .filter(
             User.role == "customer"
         )
@@ -1423,7 +1490,9 @@ def admin_analytics(
     )
 
     active_customers = (
-        db.query(func.count(User.id))
+        db.query(
+            func.count(User.id)
+        )
         .filter(
             User.role == "customer",
             User.is_active == True,
@@ -1437,7 +1506,9 @@ def admin_analytics(
     # =====================================================
 
     new_customers = (
-        db.query(func.count(User.id))
+        db.query(
+            func.count(User.id)
+        )
         .filter(
             User.role == "customer",
             User.created_at >= period_start_utc,
@@ -1448,23 +1519,62 @@ def admin_analytics(
     )
 
     # =====================================================
+    # CHEF SUMMARY
+    # =====================================================
+
+    total_chefs = (
+        db.query(
+            func.count(User.id)
+        )
+        .filter(
+            User.role == "chef"
+        )
+        .scalar()
+        or 0
+    )
+
+    active_chefs = (
+        db.query(
+            func.count(User.id)
+        )
+        .filter(
+            User.role == "chef",
+            User.is_active == True,
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
     # SUBSCRIPTIONS
     # =====================================================
 
     active_subscriptions = (
-        db.query(func.count(Subscription.id))
+        db.query(
+            func.count(
+                Subscription.id
+            )
+        )
         .filter(
-            Subscription.status == "active",
+            Subscription.status == "active"
         )
         .scalar()
         or 0
     )
 
     new_subscriptions = (
-        db.query(func.count(Subscription.id))
+        db.query(
+            func.count(
+                Subscription.id
+            )
+        )
         .filter(
-            Subscription.created_at >= period_start_utc,
-            Subscription.created_at < period_end_utc,
+            Subscription.created_at >= (
+                period_start_utc
+            ),
+            Subscription.created_at < (
+                period_end_utc
+            ),
         )
         .scalar()
         or 0
@@ -1491,12 +1601,19 @@ def admin_analytics(
             Order.created_at >= period_start_utc,
             Order.created_at < period_end_utc,
         )
-        .group_by(Order.status)
+        .group_by(
+            Order.status
+        )
         .all()
     )
 
-    for order_status, count in status_rows:
+    for (
+        order_status,
+        count,
+    ) in status_rows:
+
         if order_status in status_summary:
+
             status_summary[
                 order_status
             ] = int(count)
@@ -1522,11 +1639,16 @@ def admin_analytics(
             Order.created_at < period_end_utc,
             Order.status != "cancelled",
         )
-        .group_by(Order.payment_method)
+        .group_by(
+            Order.payment_method
+        )
         .all()
     )
 
-    for payment_method, count in payment_rows:
+    for (
+        payment_method,
+        count,
+    ) in payment_rows:
 
         method = (
             str(payment_method)
@@ -1537,24 +1659,36 @@ def admin_analytics(
         )
 
         if method == "cod":
-            payment_summary["cod"] += int(count)
+
+            payment_summary[
+                "cod"
+            ] += int(count)
 
         elif method in {
             "upi",
             "online",
             "razorpay",
         }:
-            payment_summary["upi"] += int(count)
+
+            payment_summary[
+                "upi"
+            ] += int(count)
 
         elif method in {
             "card",
             "credit_card",
             "debit_card",
         }:
-            payment_summary["card"] += int(count)
+
+            payment_summary[
+                "card"
+            ] += int(count)
 
         else:
-            payment_summary["other"] += int(count)
+
+            payment_summary[
+                "other"
+            ] += int(count)
 
     # =====================================================
     # DAILY TREND
@@ -1586,35 +1720,50 @@ def admin_analytics(
 
     for order in current_orders:
 
-        created_at = order.created_at
+        created_at = (
+            order.created_at
+        )
 
         if not created_at:
             continue
 
         if created_at.tzinfo is None:
+
             created_at_india = (
                 created_at
-                .replace(tzinfo=utc_tz)
-                .astimezone(india_tz)
+                .replace(
+                    tzinfo=utc_tz
+                )
+                .astimezone(
+                    india_tz
+                )
             )
+
         else:
+
             created_at_india = (
-                created_at.astimezone(
+                created_at
+                .astimezone(
                     india_tz
                 )
             )
 
         date_key = (
-            created_at_india.date()
+            created_at_india
+            .date()
             .isoformat()
         )
 
         if date_key not in daily:
             continue
 
-        daily[date_key]["orders"] += 1
+        daily[
+            date_key
+        ]["orders"] += 1
 
-        daily[date_key]["revenue"] += float(
+        daily[
+            date_key
+        ]["revenue"] += float(
             order.total_price or 0
         )
 
@@ -1623,6 +1772,7 @@ def admin_analytics(
     )
 
     for item in daily_trend:
+
         item["revenue"] = round(
             item["revenue"],
             2,
@@ -1638,82 +1788,894 @@ def admin_analytics(
 
         best_revenue_day = max(
             daily_trend,
-            key=lambda item: item["revenue"],
+            key=lambda item:
+                item["revenue"],
         )
 
     # =====================================================
-    # PERIOD START / END
+    # 👨‍🍳 CHEF PERFORMANCE
+    # =====================================================
+
+    chef_rows = (
+        db.query(User)
+        .filter(
+            User.role == "chef"
+        )
+        .order_by(
+            User.is_active.desc(),
+            User.created_at.desc(),
+        )
+        .all()
+    )
+
+    chef_performance = []
+
+    for chef in chef_rows:
+
+        # -------------------------------------------------
+        # PERIOD ORDERS
+        # -------------------------------------------------
+
+        chef_orders = (
+            db.query(
+                func.count(Order.id)
+            )
+            .filter(
+                Order.chef_id == chef.id,
+                Order.created_at >= (
+                    period_start_utc
+                ),
+                Order.created_at < (
+                    period_end_utc
+                ),
+                Order.status != "cancelled",
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # PERIOD REVENUE
+        # -------------------------------------------------
+
+        chef_revenue = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        Order.total_price
+                    ),
+                    0,
+                )
+            )
+            .filter(
+                Order.chef_id == chef.id,
+                Order.created_at >= (
+                    period_start_utc
+                ),
+                Order.created_at < (
+                    period_end_utc
+                ),
+                Order.status != "cancelled",
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # COMPLETED
+        # -------------------------------------------------
+
+        chef_completed = (
+            db.query(
+                func.count(Order.id)
+            )
+            .filter(
+                Order.chef_id == chef.id,
+                Order.created_at >= (
+                    period_start_utc
+                ),
+                Order.created_at < (
+                    period_end_utc
+                ),
+                Order.status == "delivered",
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # CANCELLED
+        # -------------------------------------------------
+
+        chef_cancelled = (
+            db.query(
+                func.count(Order.id)
+            )
+            .filter(
+                Order.chef_id == chef.id,
+                Order.created_at >= (
+                    period_start_utc
+                ),
+                Order.created_at < (
+                    period_end_utc
+                ),
+                Order.status == "cancelled",
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # ACTIVE ORDERS
+        # -------------------------------------------------
+
+        chef_active_orders = (
+            db.query(
+                func.count(Order.id)
+            )
+            .filter(
+                Order.chef_id == chef.id,
+                Order.status.notin_(
+                    [
+                        "delivered",
+                        "cancelled",
+                    ]
+                ),
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # CUSTOMERS SERVED
+        # -------------------------------------------------
+
+        chef_customers = (
+            db.query(
+                func.count(
+                    func.distinct(
+                        Order.user_id
+                    )
+                )
+            )
+            .filter(
+                Order.chef_id == chef.id,
+                Order.created_at >= (
+                    period_start_utc
+                ),
+                Order.created_at < (
+                    period_end_utc
+                ),
+                Order.status != "cancelled",
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # ACTIVE SUBSCRIPTIONS
+        # -------------------------------------------------
+
+        chef_active_subscriptions = (
+            db.query(
+                func.count(
+                    Subscription.id
+                )
+            )
+            .filter(
+                Subscription.chef_id == chef.id,
+                Subscription.status == "active",
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # TOTAL SUBSCRIPTIONS
+        # -------------------------------------------------
+
+        chef_total_subscriptions = (
+            db.query(
+                func.count(
+                    Subscription.id
+                )
+            )
+            .filter(
+                Subscription.chef_id == chef.id
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # TOMORROW SPECIAL COUNT
+        # -------------------------------------------------
+
+        chef_tomorrow_specials = (
+            db.query(
+                func.count(
+                    TomorrowSpecial.id
+                )
+            )
+            .filter(
+                TomorrowSpecial.chef_id == chef.id,
+                TomorrowSpecial.special_date
+                == period_end_india.date(),
+                TomorrowSpecial.is_active == 1,
+            )
+            .scalar()
+            or 0
+        )
+
+        chef_performance.append(
+            {
+                "id": str(
+                    chef.id
+                ),
+
+                "name": (
+                    chef.name
+                    or "Chef"
+                ),
+
+                "email": (
+                    chef.email
+                ),
+
+                "phone": (
+                    chef.phone
+                ),
+
+                "is_active": bool(
+                    chef.is_active
+                ),
+
+                "is_verified": bool(
+                    chef.is_verified
+                ),
+
+                "statistics": {
+
+                    "orders": int(
+                        chef_orders
+                    ),
+
+                    "revenue": round(
+                        float(
+                            chef_revenue
+                        ),
+                        2,
+                    ),
+
+                    "completed_orders": int(
+                        chef_completed
+                    ),
+
+                    "cancelled_orders": int(
+                        chef_cancelled
+                    ),
+
+                    "active_orders": int(
+                        chef_active_orders
+                    ),
+
+                    "customers_served": int(
+                        chef_customers
+                    ),
+
+                    "active_subscriptions": int(
+                        chef_active_subscriptions
+                    ),
+
+                    "total_subscriptions": int(
+                        chef_total_subscriptions
+                    ),
+
+                    "tomorrow_specials": int(
+                        chef_tomorrow_specials
+                    ),
+                },
+            }
+        )
+
+    # =====================================================
+    # 🏆 BEST CHEF
+    # =====================================================
+
+    best_chef = None
+
+    if chef_performance:
+
+        best_chef = max(
+            chef_performance,
+            key=lambda item:
+                item[
+                    "statistics"
+                ][
+                    "revenue"
+                ],
+        )
+
+    # =====================================================
+    # 🍱 TOMORROW SPECIAL ANALYTICS
+    # =====================================================
+
+    tomorrow_date = (
+        now_india.date()
+        + timedelta(days=1)
+    )
+
+    tomorrow_special_rows = (
+        db.query(
+            TomorrowSpecial,
+            User,
+        )
+        .outerjoin(
+            User,
+            User.id
+            == TomorrowSpecial.chef_id,
+        )
+        .filter(
+            TomorrowSpecial.special_date
+            == tomorrow_date,
+            TomorrowSpecial.is_active == 1,
+        )
+        .order_by(
+            TomorrowSpecial.created_at.desc()
+        )
+        .all()
+    )
+
+    tomorrow_special_data = []
+
+    total_tomorrow_preorders = 0
+    total_tomorrow_plates = 0
+    total_tomorrow_capacity = 0
+    total_tomorrow_revenue = 0.0
+
+    for (
+        special,
+        chef,
+    ) in tomorrow_special_rows:
+
+        # -------------------------------------------------
+        # PRE-ORDER COUNT
+        # -------------------------------------------------
+
+        preorder_count = (
+            db.query(
+                func.count(
+                    TomorrowSpecialPreOrder.id
+                )
+            )
+            .filter(
+                TomorrowSpecialPreOrder.special_id
+                == special.id
+            )
+            .scalar()
+            or 0
+        )
+
+        # -------------------------------------------------
+        # BOOKED PLATES
+        # -------------------------------------------------
+
+        booked_plates = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        TomorrowSpecialPreOrder.quantity
+                    ),
+                    0,
+                )
+            )
+            .filter(
+                TomorrowSpecialPreOrder.special_id
+                == special.id
+            )
+            .scalar()
+            or 0
+        )
+
+        booked_plates = int(
+            booked_plates
+        )
+
+        # -------------------------------------------------
+        # PRE-ORDER REVENUE
+        # -------------------------------------------------
+
+        preorder_revenue = (
+            db.query(
+                func.coalesce(
+                    func.sum(
+                        TomorrowSpecialPreOrder.total_amount
+                    ),
+                    0,
+                )
+            )
+            .filter(
+                TomorrowSpecialPreOrder.special_id
+                == special.id
+            )
+            .scalar()
+            or 0
+        )
+
+        preorder_revenue = float(
+            preorder_revenue
+        )
+
+        # -------------------------------------------------
+        # CAPACITY
+        # -------------------------------------------------
+
+        max_plates = int(
+            special.max_plates or 0
+        )
+
+        remaining_plates = max(
+            max_plates
+            - booked_plates,
+            0,
+        )
+
+        # -------------------------------------------------
+        # TOTALS
+        # -------------------------------------------------
+
+        total_tomorrow_preorders += int(
+            preorder_count
+        )
+
+        total_tomorrow_plates += (
+            booked_plates
+        )
+
+        total_tomorrow_capacity += (
+            max_plates
+        )
+
+        total_tomorrow_revenue += (
+            preorder_revenue
+        )
+
+        tomorrow_special_data.append(
+            {
+                "id": str(
+                    special.id
+                ),
+
+                "dish_name": (
+                    special.dish_name
+                ),
+
+                "description": (
+                    special.description
+                ),
+
+                "image_url": (
+                    special.image_url
+                ),
+
+                "price": round(
+                    float(
+                        special.price or 0
+                    ),
+                    2,
+                ),
+
+                "original_price": (
+                    round(
+                        float(
+                            special.original_price
+                            or 0
+                        ),
+                        2,
+                    )
+                    if special.original_price
+                    is not None
+                    else None
+                ),
+
+                "special_date": (
+                    special.special_date.isoformat()
+                    if special.special_date
+                    else None
+                ),
+
+                "cutoff_time": (
+                    special.cutoff_time
+                    if special.cutoff_time
+                    else None
+                ),
+
+                "max_plates": (
+                    max_plates
+                ),
+
+                "preorders": int(
+                    preorder_count
+                ),
+
+                "plates_booked": (
+                    booked_plates
+                ),
+
+                "remaining_plates": (
+                    remaining_plates
+                ),
+
+                "preorder_revenue": round(
+                    preorder_revenue,
+                    2,
+                ),
+
+                "food_type": (
+                    special.food_type
+                ),
+
+                "chef": {
+                    "id": (
+                        str(chef.id)
+                        if chef
+                        else (
+                            str(
+                                special.chef_id
+                            )
+                            if special.chef_id
+                            else None
+                        )
+                    ),
+
+                    "name": (
+                        chef.name
+                        if chef
+                        else "Chef"
+                    ),
+
+                    "email": (
+                        chef.email
+                        if chef
+                        else None
+                    ),
+
+                    "phone": (
+                        chef.phone
+                        if chef
+                        else None
+                    ),
+                },
+            }
+        )
+
+    # =====================================================
+    # 🍱 TOMORROW SPECIAL SUMMARY
+    # =====================================================
+
+    tomorrow_special_summary = {
+
+        "date": (
+            tomorrow_date.isoformat()
+        ),
+
+        "count": len(
+            tomorrow_special_data
+        ),
+
+        "preorders": (
+            total_tomorrow_preorders
+        ),
+
+        "plates": (
+            total_tomorrow_plates
+        ),
+
+        "max_plates": (
+            total_tomorrow_capacity
+        ),
+
+        "remaining": max(
+            total_tomorrow_capacity
+            - total_tomorrow_plates,
+            0,
+        ),
+
+        "revenue": round(
+            total_tomorrow_revenue,
+            2,
+        ),
+
+        "specials": (
+            tomorrow_special_data
+        ),
+    }
+
+    # =====================================================
+    # 🥗 TODAY DIET STATUS
+    # =====================================================
+
+    diet_on = (
+        db.query(
+            func.count(
+                func.distinct(
+                    SubscriptionMealSchedule.subscription_id
+                )
+            )
+        )
+        .join(
+            Subscription,
+            Subscription.id
+            == SubscriptionMealSchedule.subscription_id,
+        )
+        .filter(
+            Subscription.status == "active",
+
+            SubscriptionMealSchedule.date
+            == now_india.date(),
+
+            SubscriptionMealSchedule.status
+            == "on",
+        )
+        .scalar()
+        or 0
+    )
+
+    diet_off = (
+        db.query(
+            func.count(
+                func.distinct(
+                    SubscriptionMealSchedule.subscription_id
+                )
+            )
+        )
+        .join(
+            Subscription,
+            Subscription.id
+            == SubscriptionMealSchedule.subscription_id,
+        )
+        .filter(
+            Subscription.status == "active",
+
+            SubscriptionMealSchedule.date
+            == now_india.date(),
+
+            SubscriptionMealSchedule.status
+            == "off",
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # 📆 SUBSCRIPTIONS EXPIRING SOON
+    # =====================================================
+
+    expiring_soon = (
+        db.query(
+            func.count(
+                Subscription.id
+            )
+        )
+        .filter(
+            Subscription.status == "active",
+
+            Subscription.end_date
+            >= now_india,
+
+            Subscription.end_date
+            <= (
+                now_india
+                + timedelta(days=7)
+            ),
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # 📆 RECENTLY EXPIRED
+    # =====================================================
+
+    expired_recently = (
+        db.query(
+            func.count(
+                Subscription.id
+            )
+        )
+        .filter(
+            Subscription.end_date
+            < now_india,
+
+            Subscription.end_date
+            >= (
+                now_india
+                - timedelta(days=7)
+            ),
+        )
+        .scalar()
+        or 0
+    )
+
+    # =====================================================
+    # CHEF TOTAL REVENUE
+    # =====================================================
+
+    chef_total_revenue = round(
+        sum(
+            item[
+                "statistics"
+            ][
+                "revenue"
+            ]
+            for item
+            in chef_performance
+        ),
+        2,
+    )
+
+    # =====================================================
+    # CHEF ACTIVE ORDERS
+    # =====================================================
+
+    chef_active_order_total = (
+        sum(
+            item[
+                "statistics"
+            ][
+                "active_orders"
+            ]
+            for item
+            in chef_performance
+        )
+    )
+
+    # =====================================================
+    # PERIOD
+    # =====================================================
+
+    period_end_date = (
+        period_end_india
+        - timedelta(days=1)
+    ).strftime(
+        "%Y-%m-%d"
+    )
+
+    # =====================================================
+    # FINAL RESPONSE
     # =====================================================
 
     return {
+
         "success": True,
 
+        # =================================================
+        # PERIOD
+        # =================================================
+
         "period": {
+
             "days": days,
-            "start": period_start_india.strftime(
-                "%Y-%m-%d"
+
+            "start": (
+                period_start_india.strftime(
+                    "%Y-%m-%d"
+                )
             ),
+
             "end": (
-                period_end_india
-                - timedelta(days=1)
-            ).strftime(
-                "%Y-%m-%d"
+                period_end_date
             ),
-            "generated_at": now_india.isoformat(),
+
+            "generated_at": (
+                now_india.isoformat()
+            ),
         },
 
+        # =================================================
+        # OVERVIEW
+        # =================================================
+
         "overview": {
+
             "revenue": round(
                 current_revenue,
                 2,
             ),
 
-            "revenue_growth": revenue_growth,
+            "revenue_growth": (
+                revenue_growth
+            ),
 
-            "orders": current_orders_count,
+            "orders": (
+                current_orders_count
+            ),
 
-            "orders_growth": orders_growth,
+            "orders_growth": (
+                orders_growth
+            ),
 
             "average_order_value": round(
                 average_order_value,
                 2,
             ),
 
-            "customers": total_customers,
+            "customers": (
+                total_customers
+            ),
 
-            "active_customers": active_customers,
+            "active_customers": (
+                active_customers
+            ),
 
-            "new_customers": new_customers,
+            "new_customers": (
+                new_customers
+            ),
 
-            "active_subscriptions":
-                active_subscriptions,
+            "active_subscriptions": (
+                active_subscriptions
+            ),
 
-            "new_subscriptions":
-                new_subscriptions,
+            "new_subscriptions": (
+                new_subscriptions
+            ),
+
+            "chefs": (
+                total_chefs
+            ),
+
+            "active_chefs": (
+                active_chefs
+            ),
         },
+
+        # =================================================
+        # ORDERS
+        # =================================================
 
         "orders": {
-            "total": current_orders_count,
 
-            "pending":
-                status_summary["pending"],
+            "total": (
+                current_orders_count
+            ),
 
-            "preparing":
-                status_summary["preparing"],
+            "pending": (
+                status_summary[
+                    "pending"
+                ]
+            ),
 
-            "out_for_delivery":
+            "preparing": (
+                status_summary[
+                    "preparing"
+                ]
+            ),
+
+            "out_for_delivery": (
                 status_summary[
                     "out_for_delivery"
-                ],
+                ]
+            ),
 
-            "delivered":
-                status_summary["delivered"],
+            "delivered": (
+                status_summary[
+                    "delivered"
+                ]
+            ),
 
-            "cancelled":
-                status_summary["cancelled"],
+            "cancelled": (
+                status_summary[
+                    "cancelled"
+                ]
+            ),
         },
 
+        # =================================================
+        # REVENUE
+        # =================================================
+
         "revenue": {
+
             "current": round(
                 current_revenue,
                 2,
@@ -1724,19 +2686,158 @@ def admin_analytics(
                 2,
             ),
 
-            "growth": revenue_growth,
+            "growth": (
+                revenue_growth
+            ),
         },
 
-        "status_breakdown": status_summary,
+        # =================================================
+        # CUSTOMERS
+        # =================================================
 
-        "payment_breakdown":
-            payment_summary,
+        "customers": {
 
-        "daily_trend":
-            daily_trend,
+            "total": (
+                total_customers
+            ),
 
-        "best_day":
-            best_revenue_day,
+            "active": (
+                active_customers
+            ),
+
+            "new": (
+                new_customers
+            ),
+        },
+
+        # =================================================
+        # 👨‍🍳 CHEFS
+        # =================================================
+
+        "chefs": {
+
+            "total": (
+                total_chefs
+            ),
+
+            "active": (
+                active_chefs
+            ),
+
+            "active_orders": (
+                chef_active_order_total
+            ),
+
+            "period_revenue": (
+                chef_total_revenue
+            ),
+
+            "performance": (
+                chef_performance
+            ),
+
+            "best": (
+                best_chef
+            ),
+        },
+
+        # =================================================
+        # SUBSCRIPTIONS
+        # =================================================
+
+        "subscriptions": {
+
+            "active": (
+                active_subscriptions
+            ),
+
+            "new": (
+                new_subscriptions
+            ),
+        },
+
+        # =================================================
+        # SUBSCRIPTION HEALTH
+        # =================================================
+
+        "subscription_health": {
+
+            "active": (
+                active_subscriptions
+            ),
+
+            "new": (
+                new_subscriptions
+            ),
+
+            "expiring_soon": (
+                expiring_soon
+            ),
+
+            "expired_recently": (
+                expired_recently
+            ),
+        },
+
+        # =================================================
+        # STATUS BREAKDOWN
+        # =================================================
+
+        "status_breakdown": (
+            status_summary
+        ),
+
+        # =================================================
+        # PAYMENT BREAKDOWN
+        # =================================================
+
+        "payment_breakdown": (
+            payment_summary
+        ),
+
+        # =================================================
+        # DAILY TREND
+        # =================================================
+
+        "daily_trend": (
+            daily_trend
+        ),
+
+        # =================================================
+        # BEST DAY
+        # =================================================
+
+        "best_day": (
+            best_revenue_day
+        ),
+
+        # =================================================
+        # 🍱 TOMORROW SPECIAL
+        # =================================================
+
+        "tomorrow_special": (
+            tomorrow_special_summary
+        ),
+
+        # =================================================
+        # 🥗 DIET
+        # =================================================
+
+        "diet": {
+
+            "on": int(
+                diet_on
+            ),
+
+            "off": int(
+                diet_off
+            ),
+
+            "total": int(
+                diet_on
+                + diet_off
+            ),
+        },
     }
 
 
