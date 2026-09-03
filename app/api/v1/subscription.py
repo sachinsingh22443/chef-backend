@@ -5076,6 +5076,10 @@ def save_subscription_plan_menu_cycle(
 # ADMIN — GET ALL SUBSCRIPTIONS
 # =========================================================
 
+# =========================================================
+# ADMIN — GET ALL SUBSCRIPTIONS
+# =========================================================
+
 @router.get("/admin/all")
 def get_all_subscriptions_admin(
     db: Session = Depends(get_db),
@@ -5121,10 +5125,19 @@ def get_all_subscriptions_admin(
 
     result = []
 
+    # Today's date — India
+    today = datetime.now(IST).date()
+
     for subscription, plan, customer in rows:
 
-        # Exact subscription duration
+        # -------------------------------------------------
+        # EXACT SUBSCRIPTION DURATION
+        # -------------------------------------------------
+
         duration_days = 0
+
+        start_date = None
+        end_date = None
 
         if (
             subscription.start_date
@@ -5151,6 +5164,38 @@ def get_all_subscriptions_admin(
             duration_days = (
                 end_date - start_date
             ).days + 1
+
+        # -------------------------------------------------
+        # TODAY'S DIET STATUS
+        # -------------------------------------------------
+        #
+        # IMPORTANT:
+        # subscription.status != diet status
+        #
+        # Diet ON/OFF is controlled by today's
+        # SubscriptionMealSchedule.
+        # -------------------------------------------------
+
+        today_schedule = (
+            db.query(SubscriptionMealSchedule)
+            .filter(
+                SubscriptionMealSchedule.subscription_id
+                == subscription.id,
+                SubscriptionMealSchedule.date
+                == today,
+            )
+            .first()
+        )
+
+        diet_on = (
+            today_schedule.status == "on"
+            if today_schedule
+            else False
+        )
+
+        # -------------------------------------------------
+        # RESPONSE
+        # -------------------------------------------------
 
         result.append(
             {
@@ -5204,17 +5249,9 @@ def get_all_subscriptions_admin(
                 # Subscription
                 "duration_days": duration_days,
 
-                "start_date": (
-                    start_date
-                    if subscription.start_date
-                    else None
-                ),
+                "start_date": start_date,
 
-                "end_date": (
-                    end_date
-                    if subscription.end_date
-                    else None
-                ),
+                "end_date": end_date,
 
                 "status": subscription.status,
 
@@ -5241,16 +5278,12 @@ def get_all_subscriptions_admin(
                     subscription.breakfast_enabled
                 ),
 
-                "breakfast_price": (
-                    float(
-                        subscription.breakfast_price or 0
-                    )
+                "breakfast_price": float(
+                    subscription.breakfast_price or 0
                 ),
 
-                # Diet status
-                "diet_on": (
-                    subscription.status == "active"
-                ),
+                # Today's Diet ON / OFF
+                "diet_on": diet_on,
             }
         )
 
@@ -5258,4 +5291,336 @@ def get_all_subscriptions_admin(
         "success": True,
         "total": len(result),
         "subscriptions": result,
+    }
+    
+    
+    
+    
+# =========================================================
+# ADMIN — SUBSCRIPTION CONTROLS
+# =========================================================
+#
+# Admin can:
+# 1. Activate / deactivate subscription
+# 2. Turn today's diet ON / OFF
+# 3. Turn breakfast ON / OFF
+#
+# IMPORTANT:
+# - Subscription status controls subscription itself.
+# - Diet ON/OFF controls today's SubscriptionMealSchedule.
+# - Breakfast controls subscription.breakfast_enabled.
+# =========================================================
+
+
+# =========================================================
+# ADMIN — SUBSCRIPTION CONTROLS
+# =========================================================
+
+class AdminSubscriptionStatusUpdate(BaseModel):
+    status: str
+
+
+class AdminDietUpdate(BaseModel):
+    diet_on: bool
+
+
+class AdminBreakfastUpdate(BaseModel):
+    breakfast_enabled: bool
+
+
+# =========================================================
+# ADMIN — UPDATE SUBSCRIPTION STATUS
+# =========================================================
+
+@router.put("/admin/{subscription_id}/status")
+def admin_update_subscription_status(
+    subscription_id: UUID,
+    data: AdminSubscriptionStatusUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required",
+        )
+
+    status = data.status.lower().strip()
+
+    if status not in ("active", "inactive"):
+        raise HTTPException(
+            status_code=400,
+            detail="Status must be active or inactive",
+        )
+
+    subscription = (
+        db.query(Subscription)
+        .filter(
+            Subscription.id == subscription_id
+        )
+        .first()
+    )
+
+    if not subscription:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
+
+    subscription.status = status
+
+    # If subscription is inactive,
+    # turn OFF all meal schedules.
+    if status == "inactive":
+        schedules = (
+            db.query(SubscriptionMealSchedule)
+            .filter(
+                SubscriptionMealSchedule.subscription_id
+                == subscription.id
+            )
+            .all()
+        )
+
+        for schedule in schedules:
+            schedule.status = "off"
+
+    db.commit()
+    db.refresh(subscription)
+
+    # Clear customer subscription caches
+    if subscription.user_id:
+        delete_cache(
+            f"subscription:my:{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:active:{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:today:v2:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:True"
+        )
+
+    return {
+        "success": True,
+        "subscription_id": str(subscription.id),
+        "status": subscription.status,
+    }
+
+
+# =========================================================
+# ADMIN — TODAY DIET ON / OFF
+# =========================================================
+
+@router.put("/admin/{subscription_id}/diet")
+def admin_update_subscription_diet(
+    subscription_id: UUID,
+    data: AdminDietUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required",
+        )
+
+    subscription = (
+        db.query(Subscription)
+        .filter(
+            Subscription.id == subscription_id
+        )
+        .first()
+    )
+
+    if not subscription:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
+
+    if subscription.status != "active":
+        raise HTTPException(
+            status_code=400,
+            detail="Subscription is inactive",
+        )
+
+    today = datetime.now(IST).date()
+
+    schedules = (
+        db.query(SubscriptionMealSchedule)
+        .filter(
+            SubscriptionMealSchedule.subscription_id
+            == subscription.id,
+            SubscriptionMealSchedule.date == today,
+        )
+        .all()
+    )
+
+    if not schedules:
+        raise HTTPException(
+            status_code=404,
+            detail="No meal schedule found for today",
+        )
+
+    new_status = "on" if data.diet_on else "off"
+
+    for schedule in schedules:
+        schedule.status = new_status
+
+    db.commit()
+
+    # Clear caches
+    if subscription.user_id:
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:today:v2:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:True"
+        )
+
+    return {
+        "success": True,
+        "subscription_id": str(subscription.id),
+        "date": today,
+        "diet_on": data.diet_on,
+    }
+
+
+# =========================================================
+# ADMIN — BREAKFAST ON / OFF
+# =========================================================
+
+@router.put("/admin/{subscription_id}/breakfast")
+def admin_update_subscription_breakfast(
+    subscription_id: UUID,
+    data: AdminBreakfastUpdate,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required",
+        )
+
+    subscription = (
+        db.query(Subscription)
+        .filter(
+            Subscription.id == subscription_id
+        )
+        .first()
+    )
+
+    if not subscription:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
+
+    subscription.breakfast_enabled = (
+        data.breakfast_enabled
+    )
+
+    # If breakfast is OFF,
+    # today's breakfast schedule must also be OFF.
+    if not data.breakfast_enabled:
+
+        today = datetime.now(IST).date()
+
+        breakfast_schedules = (
+            db.query(SubscriptionMealSchedule)
+            .filter(
+                SubscriptionMealSchedule.subscription_id
+                == subscription.id,
+                SubscriptionMealSchedule.date == today,
+                SubscriptionMealSchedule.meal_type
+                == "breakfast",
+            )
+            .all()
+        )
+
+        for schedule in breakfast_schedules:
+            schedule.status = "off"
+
+    db.commit()
+    db.refresh(subscription)
+
+    # Clear caches
+    if subscription.user_id:
+        delete_cache(
+            f"subscription:my:{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:active:{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:today:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:today:v2:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:True"
+        )
+
+    return {
+        "success": True,
+        "subscription_id": str(subscription.id),
+        "breakfast_enabled": bool(
+            subscription.breakfast_enabled
+        ),
     }
