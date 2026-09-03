@@ -168,12 +168,10 @@ def get_admin_subscriber_wallets(
     # =====================================================
 
     active_subscription_user_ids = (
-        db.query(Subscription.customer_id)
-        .filter(
-            Subscription.status == "active"
-        )
-        .distinct()
-        .subquery()
+        db.query(Subscription.user_id)
+            .filter(Subscription.status == "active")
+            .distinct()
+            .subquery()
     )
 
     customers_query = (
@@ -264,7 +262,7 @@ def get_admin_subscriber_wallets(
         subscriptions = (
             db.query(Subscription)
             .filter(
-                Subscription.customer_id == customer.id,
+                Subscription.user_id == customer.id,
                 Subscription.status == "active",
             )
             .order_by(
