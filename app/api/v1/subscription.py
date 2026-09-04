@@ -5332,6 +5332,10 @@ class AdminBreakfastUpdate(BaseModel):
 # ADMIN — UPDATE SUBSCRIPTION STATUS
 # =========================================================
 
+# =========================================================
+# ADMIN — UPDATE SUBSCRIPTION STATUS
+# =========================================================
+
 @router.put("/admin/{subscription_id}/status")
 def admin_update_subscription_status(
     subscription_id: UUID,
@@ -5339,12 +5343,18 @@ def admin_update_subscription_status(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # ---------------------------------------------------------
+    # ADMIN CHECK
+    # ---------------------------------------------------------
     if user.role != "admin":
         raise HTTPException(
             status_code=403,
             detail="Admin access required",
         )
 
+    # ---------------------------------------------------------
+    # NORMALIZE STATUS
+    # ---------------------------------------------------------
     status = data.status.lower().strip()
 
     if status not in ("active", "inactive"):
@@ -5353,6 +5363,9 @@ def admin_update_subscription_status(
             detail="Status must be active or inactive",
         )
 
+    # ---------------------------------------------------------
+    # GET SUBSCRIPTION
+    # ---------------------------------------------------------
     subscription = (
         db.query(Subscription)
         .filter(
@@ -5367,28 +5380,46 @@ def admin_update_subscription_status(
             detail="Subscription not found",
         )
 
+    # ---------------------------------------------------------
+    # UPDATE SUBSCRIPTION STATUS
+    # ---------------------------------------------------------
     subscription.status = status
 
-    # If subscription is inactive,
-    # turn OFF all meal schedules.
-    if status == "inactive":
-        schedules = (
-            db.query(SubscriptionMealSchedule)
-            .filter(
-                SubscriptionMealSchedule.subscription_id
-                == subscription.id
-            )
-            .all()
+    # ---------------------------------------------------------
+    # UPDATE ALL MEAL SCHEDULES
+    #
+    # INACTIVE:
+    #   All schedules -> OFF
+    #
+    # ACTIVE:
+    #   All schedules -> ON
+    # ---------------------------------------------------------
+    schedules = (
+        db.query(SubscriptionMealSchedule)
+        .filter(
+            SubscriptionMealSchedule.subscription_id
+            == subscription.id
         )
+        .all()
+    )
 
-        for schedule in schedules:
+    for schedule in schedules:
+        if status == "inactive":
             schedule.status = "off"
+        else:
+            schedule.status = "on"
 
+    # ---------------------------------------------------------
+    # SAVE CHANGES
+    # ---------------------------------------------------------
     db.commit()
     db.refresh(subscription)
 
-    # Clear customer subscription caches
+    # ---------------------------------------------------------
+    # CLEAR CUSTOMER SUBSCRIPTION CACHES
+    # ---------------------------------------------------------
     if subscription.user_id:
+
         delete_cache(
             f"subscription:my:{subscription.user_id}"
         )
@@ -5421,6 +5452,25 @@ def admin_update_subscription_status(
             f"{subscription.user_id}:True"
         )
 
+        # -----------------------------------------------------
+        # IMPORTANT:
+        # Latest subscription meals cache
+        # -----------------------------------------------------
+        delete_cache(
+            f"subscription:meals:v5:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:False"
+        )
+
+        delete_cache(
+            f"subscription:meals:v5:"
+            f"{subscription.id}:"
+            f"{subscription.user_id}:True"
+        )
+
+    # ---------------------------------------------------------
+    # RESPONSE
+    # ---------------------------------------------------------
     return {
         "success": True,
         "subscription_id": str(subscription.id),
