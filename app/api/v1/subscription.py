@@ -14,9 +14,7 @@ from app.models.notification import Notification
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
 from app.models.subscription_plan_menu_cycle import SubscriptionPlanMenuCycle
 from app.services.wallet import credit_wallet, debit_wallet
-from app.services.whatsapp import (
-    send_subscription_meal_whatsapp,
-)
+
 from app.api.deps import get_db, get_current_user
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
@@ -3311,6 +3309,10 @@ def get_customer_subscription_menu_cycle(
 # TURN MEAL OFF
 # =========================================================
 
+# =========================================================
+# TURN MEAL OFF
+# =========================================================
+
 @router.post("/{subscription_id}/meals/{meal_type}/off")
 async def turn_meal_off(
     subscription_id: UUID,
@@ -3322,9 +3324,7 @@ async def turn_meal_off(
     # 1. VALIDATE MEAL TYPE
     # =====================================================
 
-    meal_type = (
-        meal_type or ""
-    ).lower().strip()
+    meal_type = (meal_type or "").lower().strip()
 
     if meal_type not in MEAL_CUTOFF_TIMES:
         raise HTTPException(
@@ -3384,10 +3384,7 @@ async def turn_meal_off(
         .filter(
             SubscriptionMealSchedule.subscription_id
             == subscription.id,
-
-            SubscriptionMealSchedule.date
-            == today,
-
+            SubscriptionMealSchedule.date == today,
             SubscriptionMealSchedule.meal_type
             == meal_type,
         )
@@ -3426,9 +3423,7 @@ async def turn_meal_off(
             "message": (
                 f"{meal_type.title()} is already off"
             ),
-            "subscription_id": str(
-                subscription.id
-            ),
+            "subscription_id": str(subscription.id),
             "date": today,
             "meal_type": meal_type,
             "status": "off",
@@ -3440,14 +3435,13 @@ async def turn_meal_off(
     # 8. GET TODAY'S ACTUAL NORMAL MENU
     #
     # IMPORTANT:
-    # Wallet amount MUST be same as Today's Meal price.
+    # Wallet amount MUST be same as today's
+    # subscription meal price.
     #
-    # Normal Menu price = ₹180
-    # Subscription price = ₹170
+    # Normal Menu ₹180
+    # Subscription ₹170
     #
-    # Therefore OFF → wallet +₹170
-    #
-    # meal.meal_price IS NOT USED HERE.
+    # OFF → wallet +₹170
     # =====================================================
 
     normal_menu, source = get_menu_for_day(
@@ -3468,9 +3462,6 @@ async def turn_meal_off(
 
     # =====================================================
     # 9. CALCULATE CURRENT SUBSCRIPTION PRICE
-    #
-    # Normal Menu ₹180
-    # Subscription ₹170
     # =====================================================
 
     normal_menu_price = float(
@@ -3637,33 +3628,18 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 19. WHATSAPP
+        # IMPORTANT:
+        # WhatsApp call removed from here.
+        #
+        # DB commit + wallet update should return
+        # immediately without waiting for WhatsApp API.
         # =================================================
 
-        try:
-
-            await send_subscription_meal_whatsapp(
-                customer_name=user.name,
-                meal_type=meal_type,
-                action="off",
-                date=str(today),
-                amount=amount,
-            )
-
-        except Exception:
-
-            logger.exception(
-                "Failed to send diet OFF "
-                "WhatsApp notification"
-            )
-
     except HTTPException:
-
         db.rollback()
         raise
 
     except Exception as e:
-
         db.rollback()
 
         logger.exception(
@@ -3677,7 +3653,7 @@ async def turn_meal_off(
         )
 
     # =====================================================
-    # 20. RESPONSE
+    # 19. RESPONSE
     # =====================================================
 
     return {
@@ -3685,25 +3661,21 @@ async def turn_meal_off(
             f"{meal_type.title()} "
             f"turned off successfully"
         ),
-
         "subscription_id": str(
             subscription.id
         ),
-
         "date": today,
-
         "meal_type": meal_type,
-
         "status": "off",
-
         "wallet_credit": amount,
-
         "normal_menu_price": normal_menu_price,
-
         "subscription_price": amount,
-
         "cutoff_at": meal.cutoff_at,
     }
+# =========================================================
+# TURN MEAL ON
+# =========================================================
+
 # =========================================================
 # TURN MEAL ON
 # =========================================================
@@ -3731,9 +3703,7 @@ async def turn_meal_on(
     # 1. VALIDATE MEAL TYPE
     # =====================================================
 
-    meal_type = (
-        meal_type or ""
-    ).lower().strip()
+    meal_type = (meal_type or "").lower().strip()
 
     if meal_type not in MEAL_CUTOFF_TIMES:
         raise HTTPException(
@@ -3793,10 +3763,7 @@ async def turn_meal_on(
         .filter(
             SubscriptionMealSchedule.subscription_id
             == subscription.id,
-
-            SubscriptionMealSchedule.date
-            == today,
-
+            SubscriptionMealSchedule.date == today,
             SubscriptionMealSchedule.meal_type
             == meal_type,
         )
@@ -3849,14 +3816,13 @@ async def turn_meal_on(
     # 8. GET TODAY'S ACTUAL NORMAL MENU
     #
     # IMPORTANT:
-    # Wallet amount MUST be same as Today's Meal price.
+    # Wallet amount MUST be same as today's
+    # subscription meal price.
     #
-    # Normal Menu price = ₹180
-    # Subscription price = ₹170
+    # Normal Menu ₹180
+    # Subscription ₹170
     #
-    # Therefore ON → wallet -₹170
-    #
-    # meal.meal_price IS NOT USED HERE.
+    # ON → wallet -₹170
     # =====================================================
 
     normal_menu, source = get_menu_for_day(
@@ -3877,9 +3843,6 @@ async def turn_meal_on(
 
     # =====================================================
     # 9. CALCULATE CURRENT SUBSCRIPTION PRICE
-    #
-    # Normal Menu ₹180
-    # Subscription ₹170
     # =====================================================
 
     normal_menu_price = float(
@@ -3911,7 +3874,6 @@ async def turn_meal_on(
         # =================================================
 
         try:
-
             debit_wallet(
                 db=db,
                 user_id=user.id,
@@ -3927,7 +3889,6 @@ async def turn_meal_on(
             )
 
         except ValueError:
-
             db.rollback()
 
             raise HTTPException(
@@ -4062,33 +4023,18 @@ async def turn_meal_on(
         )
 
         # =================================================
-        # 19. WHATSAPP
+        # IMPORTANT:
+        # WhatsApp call removed from here.
+        #
+        # DB commit + wallet update should return
+        # immediately without waiting for WhatsApp API.
         # =================================================
 
-        try:
-
-            await send_subscription_meal_whatsapp(
-                customer_name=user.name,
-                meal_type=meal_type,
-                action="on",
-                date=str(today),
-                amount=amount,
-            )
-
-        except Exception:
-
-            logger.exception(
-                "Failed to send diet ON "
-                "WhatsApp notification"
-            )
-
     except HTTPException:
-
         db.rollback()
         raise
 
     except Exception as e:
-
         db.rollback()
 
         logger.exception(
@@ -4102,7 +4048,7 @@ async def turn_meal_on(
         )
 
     # =====================================================
-    # 20. RESPONSE
+    # 19. RESPONSE
     # =====================================================
 
     return {
@@ -4110,23 +4056,15 @@ async def turn_meal_on(
             f"{meal_type.title()} "
             f"turned on successfully"
         ),
-
         "subscription_id": str(
             subscription.id
         ),
-
         "date": today,
-
         "meal_type": meal_type,
-
         "status": "on",
-
         "wallet_debit": amount,
-
         "normal_menu_price": normal_menu_price,
-
         "subscription_price": amount,
-
         "cutoff_at": meal.cutoff_at,
     }
 # =========================================================

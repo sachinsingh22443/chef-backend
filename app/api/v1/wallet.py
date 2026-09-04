@@ -235,10 +235,11 @@ def get_admin_subscriber_wallets(
     }
 
     DEBIT_TYPES = {
-        "debit",
-        "deduct",
-        "payment",
-        "meal_payment",
+     "debit",
+     "deduct",
+     "payment",
+     "meal_payment",
+     "meal_on_debit",
     }
 
     # =====================================================
