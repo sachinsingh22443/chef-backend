@@ -9,6 +9,7 @@ from app.core.cache import (
     set_cache,
     delete_cache,
 )
+from app.models.wallet import Wallet
 import uuid
 from app.models.notification import Notification
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
@@ -3554,6 +3555,19 @@ async def turn_meal_off(
 
         db.commit()
         db.refresh(meal)
+        
+        wallet = (
+            db.query(Wallet)
+            .filter(
+                Wallet.user_id == user.id
+            )
+            .first()
+        )
+        wallet_balance = (
+            float(wallet.balance or 0.0)
+            if wallet
+            else 0.0
+        )
 
         # =================================================
         # 16. CLEAR TODAY CACHE
@@ -3667,9 +3681,15 @@ async def turn_meal_off(
         "date": today,
         "meal_type": meal_type,
         "status": "off",
+
+        # Wallet
         "wallet_credit": amount,
+        "wallet_balance": wallet_balance,
+
+        # Price
         "normal_menu_price": normal_menu_price,
         "subscription_price": amount,
+
         "cutoff_at": meal.cutoff_at,
     }
 # =========================================================
@@ -3949,6 +3969,24 @@ async def turn_meal_on(
 
         db.commit()
         db.refresh(meal)
+        
+                # =================================================
+        # GET UPDATED WALLET BALANCE
+        # =================================================
+
+        wallet = (
+            db.query(Wallet)
+            .filter(
+                Wallet.user_id == user.id
+            )
+            .first()
+        )
+
+        wallet_balance = (
+            float(wallet.balance or 0.0)
+            if wallet
+            else 0.0
+        )
 
         # =================================================
         # 16. CLEAR TODAY CACHE
@@ -4062,9 +4100,15 @@ async def turn_meal_on(
         "date": today,
         "meal_type": meal_type,
         "status": "on",
+
+        # Wallet
         "wallet_debit": amount,
+        "wallet_balance": wallet_balance,
+
+        # Price
         "normal_menu_price": normal_menu_price,
         "subscription_price": amount,
+
         "cutoff_at": meal.cutoff_at,
     }
 # =========================================================
