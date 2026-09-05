@@ -3314,6 +3314,10 @@ def get_customer_subscription_menu_cycle(
 # TURN MEAL OFF
 # =========================================================
 
+# =========================================================
+# TURN MEAL OFF
+# =========================================================
+
 @router.post("/{subscription_id}/meals/{meal_type}/off")
 async def turn_meal_off(
     subscription_id: UUID,
@@ -3490,13 +3494,44 @@ async def turn_meal_off(
     try:
 
         # =================================================
-        # 11. TURN MEAL OFF
+        # 11. TURN TODAY'S MEAL OFF
         # =================================================
 
         meal.status = "off"
 
         # =================================================
-        # 12. CREDIT WALLET
+        # 12. TOMORROW'S SAME MEAL MUST ALWAYS BE ON
+        #
+        # Example:
+        # Today Lunch  -> OFF
+        # Tomorrow Lunch -> ON
+        #
+        # Today Dinner -> OFF
+        # Tomorrow Dinner -> ON
+        #
+        # Today Breakfast -> OFF
+        # Tomorrow Breakfast -> ON
+        # =================================================
+
+        tomorrow = today + timedelta(days=1)
+
+        tomorrow_meal = (
+            db.query(SubscriptionMealSchedule)
+            .filter(
+                SubscriptionMealSchedule.subscription_id
+                == subscription.id,
+                SubscriptionMealSchedule.date == tomorrow,
+                SubscriptionMealSchedule.meal_type
+                == meal_type,
+            )
+            .first()
+        )
+
+        if tomorrow_meal:
+            tomorrow_meal.status = "on"
+
+        # =================================================
+        # 13. CREDIT WALLET
         # =================================================
 
         credit_wallet(
@@ -3514,7 +3549,7 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 13. CUSTOMER NOTIFICATION
+        # 14. CUSTOMER NOTIFICATION
         # =================================================
 
         notification = Notification(
@@ -3532,7 +3567,7 @@ async def turn_meal_off(
         db.add(notification)
 
         # =================================================
-        # 14. CHEF NOTIFICATION
+        # 15. CHEF NOTIFICATION
         # =================================================
 
         chef_notification = Notification(
@@ -3550,12 +3585,12 @@ async def turn_meal_off(
         db.add(chef_notification)
 
         # =================================================
-        # 15. COMMIT
+        # 16. COMMIT
         # =================================================
 
         db.commit()
         db.refresh(meal)
-        
+
         wallet = (
             db.query(Wallet)
             .filter(
@@ -3563,6 +3598,7 @@ async def turn_meal_off(
             )
             .first()
         )
+
         wallet_balance = (
             float(wallet.balance or 0.0)
             if wallet
@@ -3570,7 +3606,7 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 16. CLEAR TODAY CACHE
+        # 17. CLEAR TODAY CACHE
         # =================================================
 
         delete_cache(
@@ -3586,7 +3622,7 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 17. CLEAR MENU CYCLE CACHE
+        # 18. CLEAR MENU CYCLE CACHE
         # =================================================
 
         delete_cache(
@@ -3614,7 +3650,7 @@ async def turn_meal_off(
         )
 
         # =================================================
-        # 18. CLEAR SUBSCRIPTION MEALS CACHE
+        # 19. CLEAR SUBSCRIPTION MEALS CACHE
         # =================================================
 
         delete_cache(
@@ -3667,7 +3703,7 @@ async def turn_meal_off(
         )
 
     # =====================================================
-    # 19. RESPONSE
+    # 20. RESPONSE
     # =====================================================
 
     return {
@@ -3681,15 +3717,8 @@ async def turn_meal_off(
         "date": today,
         "meal_type": meal_type,
         "status": "off",
-
-        # Wallet
         "wallet_credit": amount,
         "wallet_balance": wallet_balance,
-
-        # Price
-        "normal_menu_price": normal_menu_price,
-        "subscription_price": amount,
-
         "cutoff_at": meal.cutoff_at,
     }
 # =========================================================
