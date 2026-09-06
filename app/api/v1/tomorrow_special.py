@@ -187,68 +187,113 @@ def is_valid_special(s):
 # =============================
 # ✅ GET MY SPECIALS
 # =============================
+# =============================
+# ✅ GET MY SPECIALS
+# =============================
 @router.get("/")
 def get_my_specials(
     db: Session = Depends(get_db),
-    user = Depends(get_current_user)
+    user=Depends(get_current_user),
 ):
+    # =====================================================
+    # 🔐 ONLY CHEF
+    # =====================================================
+    if user.role != "chef":
+        raise HTTPException(
+            status_code=403,
+            detail="Only chefs can access their Tomorrow Specials",
+        )
+
+    # =====================================================
+    # 🔥 GET CHEF ACTIVE SPECIALS
+    # =====================================================
     specials = (
-       db.query(TomorrowSpecial)
-       .filter(
-        TomorrowSpecial.chef_id == user.id,
-        TomorrowSpecial.is_active == 1
+        db.query(TomorrowSpecial)
+        .filter(
+            TomorrowSpecial.chef_id == user.id,
+            TomorrowSpecial.is_active == 1,
         )
-         .order_by(TomorrowSpecial.created_at.desc())
-         .all()
+        .order_by(
+            TomorrowSpecial.special_date.asc(),
+            TomorrowSpecial.created_at.desc(),
+        )
+        .all()
+    )
+
+    # =====================================================
+    # ⏰ ONLY CURRENT/ACTIVE SPECIALS
+    #
+    # Cutoff/end time ke baad special:
+    # - Tomorrow Special me nahi dikhega
+    # - Database se delete nahi hoga
+    # - History me available rahega
+    # =====================================================
+    active_specials = []
+
+    for s in specials:
+
+        if not is_valid_special(s):
+            continue
+
+        remaining = max(
+            int(s.max_plates or 0) - int(s.pre_orders or 0),
+            0,
         )
 
-    return [
-     {
-        "id": str(s.id),
+        active_specials.append({
+            "id": str(s.id),
 
-        "dish_name": s.dish_name,
-        "description": s.description,
+            # 🍽️ Dish
+            "dish_name": s.dish_name,
+            "description": s.description,
 
-        # 💰 Pricing
-        "price": s.price,
-        "original_price": s.original_price,
+            # 💰 Pricing
+            "price": s.price,
+            "original_price": s.original_price,
 
-        # 🥗 Nutrition
-        "calories": s.calories,
-        "protein": s.protein,
-        "carbs": s.carbs,
-        "fats": s.fats,
+            # 🥗 Nutrition
+            "calories": s.calories,
+            "protein": s.protein,
+            "carbs": s.carbs,
+            "fats": s.fats,
 
-        # 🍳 Preparation
-        "preparation_time": s.preparation_time,
+            # 🍳 Preparation
+            "preparation_time": s.preparation_time,
 
-        # 🧂 Ingredients
-        "ingredients": s.ingredients,
+            # 🧂 Ingredients
+            "ingredients": s.ingredients,
 
-        # 📦 Quantity
-        "max_plates": s.max_plates,
-        "pre_orders": s.pre_orders,
-        "remaining": s.max_plates - s.pre_orders,
+            # 📦 Quantity
+            "max_plates": s.max_plates,
+            "pre_orders": s.pre_orders,
+            "remaining": remaining,
 
-        # ⏰ Timing
-        "cutoff_time": s.cutoff_time,
-        "special_date": s.special_date.isoformat() if s.special_date else None,
-    
-        # 🖼️ Image
-        "image_url": s.image_url,
+            # ⏰ Timing
+            "cutoff_time": s.cutoff_time,
+            "special_date": (
+                s.special_date.isoformat()
+                if s.special_date
+                else None
+            ),
 
-        # 🌱 Food
-        "food_type": s.food_type,
+            # 🖼️ Image
+            "image_url": s.image_url,
 
-        "is_active": s.is_active,
-     }
-     for s in specials
-    ]
+            # 🌱 Food
+            "food_type": s.food_type,
 
+            # 📊 Status
+            "is_active": s.is_active,
 
-# =============================
-# 👨‍🍳 CHEF - MY SPECIAL HISTORY
-# =============================
+            # 🕒 Created
+            "created_at": (
+                s.created_at.isoformat()
+                if s.created_at
+                else None
+            ),
+        })
+
+    return active_specials
 @router.get("/history")
 def get_special_history(
     date_filter: date = None,
@@ -451,6 +496,118 @@ def get_all_specials(db: Session = Depends(get_db)):
             "created_at": s.created_at.isoformat(),
            })
     return data
+
+
+# =========================================================
+# 🔎 CHEF - VIEW SINGLE SPECIAL
+# =========================================================
+@router.get("/{special_id}")
+def get_my_special_detail(
+    special_id: UUID,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # =====================================================
+    # 🔐 ONLY CHEF
+    # =====================================================
+    if user.role != "chef":
+        raise HTTPException(
+            status_code=403,
+            detail="Only chefs can view special details",
+        )
+
+    # =====================================================
+    # 🔎 GET SPECIAL
+    # =====================================================
+    special = (
+        db.query(TomorrowSpecial)
+        .filter(
+            TomorrowSpecial.id == special_id,
+            TomorrowSpecial.chef_id == user.id,
+        )
+        .first()
+    )
+
+    if not special:
+        raise HTTPException(
+            status_code=404,
+            detail="Tomorrow Special not found",
+        )
+
+    # =====================================================
+    # 📦 PLATES
+    # =====================================================
+    max_plates = int(special.max_plates or 0)
+    pre_orders = int(special.pre_orders or 0)
+
+    remaining = max(
+        max_plates - pre_orders,
+        0,
+    )
+
+    # =====================================================
+    # 📊 RESPONSE
+    # =====================================================
+    return {
+        "success": True,
+
+        "special": {
+            "id": str(special.id),
+
+            # 🍽️ DISH
+            "dish_name": special.dish_name,
+            "description": special.description,
+
+            # 💰 PRICE
+            "price": float(special.price or 0),
+            "original_price": (
+                float(special.original_price)
+                if special.original_price is not None
+                else None
+            ),
+
+            # 📦 QUANTITY
+            "max_plates": max_plates,
+            "pre_orders": pre_orders,
+            "remaining": remaining,
+
+            # ⏰ DATE / TIME
+            "special_date": (
+                special.special_date.isoformat()
+                if special.special_date
+                else None
+            ),
+            "cutoff_time": special.cutoff_time,
+
+            # 🥗 NUTRITION
+            "calories": special.calories,
+            "protein": special.protein,
+            "carbs": special.carbs,
+            "fats": special.fats,
+
+            # 🍳 PREPARATION
+            "preparation_time": special.preparation_time,
+
+            # 🧂 INGREDIENTS
+            "ingredients": special.ingredients,
+
+            # 🌱 FOOD TYPE
+            "food_type": special.food_type,
+
+            # 🖼️ IMAGE
+            "image_url": special.image_url,
+
+            # 📊 STATUS
+            "is_active": special.is_active,
+
+            # 🕒 CREATED
+            "created_at": (
+                special.created_at.isoformat()
+                if special.created_at
+                else None
+            ),
+        },
+    }
 
 # =========================================================
 # 🍱 TOMORROW SPECIAL PRE-ORDER
