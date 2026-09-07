@@ -501,113 +501,6 @@ def get_all_specials(db: Session = Depends(get_db)):
 # =========================================================
 # 🔎 CHEF - VIEW SINGLE SPECIAL
 # =========================================================
-@router.get("/{special_id}")
-def get_my_special_detail(
-    special_id: UUID,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    # =====================================================
-    # 🔐 ONLY CHEF
-    # =====================================================
-    if user.role != "chef":
-        raise HTTPException(
-            status_code=403,
-            detail="Only chefs can view special details",
-        )
-
-    # =====================================================
-    # 🔎 GET SPECIAL
-    # =====================================================
-    special = (
-        db.query(TomorrowSpecial)
-        .filter(
-            TomorrowSpecial.id == special_id,
-            TomorrowSpecial.chef_id == user.id,
-        )
-        .first()
-    )
-
-    if not special:
-        raise HTTPException(
-            status_code=404,
-            detail="Tomorrow Special not found",
-        )
-
-    # =====================================================
-    # 📦 PLATES
-    # =====================================================
-    max_plates = int(special.max_plates or 0)
-    pre_orders = int(special.pre_orders or 0)
-
-    remaining = max(
-        max_plates - pre_orders,
-        0,
-    )
-
-    # =====================================================
-    # 📊 RESPONSE
-    # =====================================================
-    return {
-        "success": True,
-
-        "special": {
-            "id": str(special.id),
-
-            # 🍽️ DISH
-            "dish_name": special.dish_name,
-            "description": special.description,
-
-            # 💰 PRICE
-            "price": float(special.price or 0),
-            "original_price": (
-                float(special.original_price)
-                if special.original_price is not None
-                else None
-            ),
-
-            # 📦 QUANTITY
-            "max_plates": max_plates,
-            "pre_orders": pre_orders,
-            "remaining": remaining,
-
-            # ⏰ DATE / TIME
-            "special_date": (
-                special.special_date.isoformat()
-                if special.special_date
-                else None
-            ),
-            "cutoff_time": special.cutoff_time,
-
-            # 🥗 NUTRITION
-            "calories": special.calories,
-            "protein": special.protein,
-            "carbs": special.carbs,
-            "fats": special.fats,
-
-            # 🍳 PREPARATION
-            "preparation_time": special.preparation_time,
-
-            # 🧂 INGREDIENTS
-            "ingredients": special.ingredients,
-
-            # 🌱 FOOD TYPE
-            "food_type": special.food_type,
-
-            # 🖼️ IMAGE
-            "image_url": special.image_url,
-
-            # 📊 STATUS
-            "is_active": special.is_active,
-
-            # 🕒 CREATED
-            "created_at": (
-                special.created_at.isoformat()
-                if special.created_at
-                else None
-            ),
-        },
-    }
 
 # =========================================================
 # 🍱 TOMORROW SPECIAL PRE-ORDER
@@ -1334,4 +1227,115 @@ def get_special_pre_orders(
         },
 
         "customers": customers,
+    }
+    
+    
+    
+    
+@router.get("/{special_id}")
+def get_my_special_detail(
+    special_id: UUID,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # =====================================================
+    # 🔐 ONLY CHEF
+    # =====================================================
+    if user.role != "chef":
+        raise HTTPException(
+            status_code=403,
+            detail="Only chefs can view special details",
+        )
+
+    # =====================================================
+    # 🔎 GET SPECIAL
+    # =====================================================
+    special = (
+        db.query(TomorrowSpecial)
+        .filter(
+            TomorrowSpecial.id == special_id,
+            TomorrowSpecial.chef_id == user.id,
+        )
+        .first()
+    )
+
+    if not special:
+        raise HTTPException(
+            status_code=404,
+            detail="Tomorrow Special not found",
+        )
+
+    # =====================================================
+    # 📦 PLATES
+    # =====================================================
+    max_plates = int(special.max_plates or 0)
+    pre_orders = int(special.pre_orders or 0)
+
+    remaining = max(
+        max_plates - pre_orders,
+        0,
+    )
+
+    # =====================================================
+    # 📊 RESPONSE
+    # =====================================================
+    return {
+        "success": True,
+
+        "special": {
+            "id": str(special.id),
+
+            # 🍽️ DISH
+            "dish_name": special.dish_name,
+            "description": special.description,
+
+            # 💰 PRICE
+            "price": float(special.price or 0),
+            "original_price": (
+                float(special.original_price)
+                if special.original_price is not None
+                else None
+            ),
+
+            # 📦 QUANTITY
+            "max_plates": max_plates,
+            "pre_orders": pre_orders,
+            "remaining": remaining,
+
+            # ⏰ DATE / TIME
+            "special_date": (
+                special.special_date.isoformat()
+                if special.special_date
+                else None
+            ),
+            "cutoff_time": special.cutoff_time,
+
+            # 🥗 NUTRITION
+            "calories": special.calories,
+            "protein": special.protein,
+            "carbs": special.carbs,
+            "fats": special.fats,
+
+            # 🍳 PREPARATION
+            "preparation_time": special.preparation_time,
+
+            # 🧂 INGREDIENTS
+            "ingredients": special.ingredients,
+
+            # 🌱 FOOD TYPE
+            "food_type": special.food_type,
+
+            # 🖼️ IMAGE
+            "image_url": special.image_url,
+
+            # 📊 STATUS
+            "is_active": special.is_active,
+
+            # 🕒 CREATED
+            "created_at": (
+                special.created_at.isoformat()
+                if special.created_at
+                else None
+            ),
+        },
     }
