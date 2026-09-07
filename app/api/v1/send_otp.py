@@ -231,13 +231,13 @@ def change(
     return {"message": "Password changed successfully"}
 
 
-@router.post("/refresh")
+@router.post("/customer-refresh")
 def refresh_access_token(
     data: RefreshTokenSchema,
     db: Session = Depends(get_db)
 ):
-    payload = verify_refresh_token(data.refresh_token)
 
+    payload = verify_refresh_token(data.refresh_token)
     token_hash = hash_refresh_token(data.refresh_token)
 
     db_token = (
