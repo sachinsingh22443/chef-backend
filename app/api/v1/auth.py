@@ -198,11 +198,14 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
-# =========================
-# 🔄 REFRESH ACCESS TOKEN
-# =========================
-@router.post("/customer-refresh")
-def refresh_access_token(
+# # =========================
+# # 🔄 REFRESH ACCESS TOKEN
+# # =========================
+# # =========================
+# # 🔄 CUSTOMER REFRESH TOKEN
+# # =========================
+@router.post("/refresh")
+def customer_refresh_access_token(
     data: RefreshTokenRequest,
     db: Session = Depends(get_db)
 ):
@@ -246,18 +249,6 @@ def refresh_access_token(
             detail="Account is disabled"
         )
 
-    if user.role != "chef":
-        raise HTTPException(
-            status_code=403,
-            detail="Not a chef account"
-        )
-
-    if user.application_status != "approved":
-        raise HTTPException(
-            status_code=403,
-            detail="Your account is not approved"
-        )
-
     # =========================
     # 🔐 NEW ACCESS TOKEN
     # =========================
@@ -273,6 +264,26 @@ def refresh_access_token(
         "sub": str(user.id),
         "role": user.role
     })
+
+    # =========================
+    # 💾 SAVE NEW REFRESH TOKEN
+    # =========================
+    from app.models.refresh_token import RefreshToken
+    from app.core.security import hash_refresh_token
+
+    new_token = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(
+            new_refresh_token
+        ),
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(days=365)
+        )
+    )
+
+    db.add(new_token)
+    db.commit()
 
     return {
         "access_token": access_token,

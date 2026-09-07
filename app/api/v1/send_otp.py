@@ -231,40 +231,73 @@ def change(
     return {"message": "Password changed successfully"}
 
 
+# =========================
+# 🔄 CUSTOMER REFRESH TOKEN
+# =========================
+
 @router.post("/customer-refresh")
-def refresh_access_token(
+def customer_refresh_access_token(
     data: RefreshTokenSchema,
     db: Session = Depends(get_db)
 ):
-
+    # =========================
+    # 🔐 VERIFY REFRESH JWT
+    # =========================
     payload = verify_refresh_token(data.refresh_token)
-    token_hash = hash_refresh_token(data.refresh_token)
 
+    user_id = payload.get("sub")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid refresh token"
+        )
+
+    # =========================
+    # 🔐 HASH REFRESH TOKEN
+    # =========================
+    token_hash = hash_refresh_token(
+        data.refresh_token
+    )
+
+    # =========================
+    # 🔎 FIND TOKEN IN DB
+    # =========================
     db_token = (
         db.query(RefreshToken)
         .filter(
             RefreshToken.token_hash == token_hash,
             RefreshToken.is_revoked == False
         )
-        .limit(1)
         .first()
     )
 
     if not db_token:
         raise HTTPException(
             status_code=401,
-            detail="Invalid refresh token"
+            detail="Refresh token not found"
         )
 
+    # =========================
+    # ⏰ CHECK EXPIRY
+    # =========================
     if db_token.expires_at < datetime.utcnow():
+        db_token.is_revoked = True
+        db.commit()
+
         raise HTTPException(
             status_code=401,
             detail="Refresh token expired"
         )
 
-    user = db.query(User).filter(
-        User.id == payload["sub"]
-    ).first()
+    # =========================
+    # 👤 FIND CUSTOMER
+    # =========================
+    user = (
+        db.query(User)
+        .filter(User.id == user_id)
+        .first()
+    )
 
     if not user:
         raise HTTPException(
@@ -272,13 +305,60 @@ def refresh_access_token(
             detail="User not found"
         )
 
+    # =========================
+    # 🚫 ACCOUNT CHECK
+    # =========================
+    if not user.is_active:
+        raise HTTPException(
+            status_code=403,
+            detail="Account is disabled"
+        )
+
+    # =========================
+    # 🔄 REVOKE OLD TOKEN
+    # =========================
+    db_token.is_revoked = True
+
+    # =========================
+    # 🔐 CREATE NEW ACCESS TOKEN
+    # =========================
     access_token = create_access_token({
         "sub": str(user.id),
         "role": user.role
     })
 
+    # =========================
+    # 🔄 CREATE NEW REFRESH TOKEN
+    # =========================
+    new_refresh_token = create_refresh_token({
+        "sub": str(user.id)
+    })
+
+    # =========================
+    # 💾 SAVE NEW REFRESH TOKEN
+    # =========================
+    new_token = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(
+            new_refresh_token
+        ),
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(days=365)
+        )
+    )
+
+    db.add(new_token)
+    db.commit()
+
+    # =========================
+    # 📦 RESPONSE
+    # =========================
     return {
-        "access_token": access_token
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "user_id": str(user.id)
     }
 @router.get("/verify-token")
 def verify_token(current_user=Depends(get_current_user)):
