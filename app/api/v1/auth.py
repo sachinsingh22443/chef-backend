@@ -472,30 +472,30 @@ def refresh_access_token(
     # =========================
     # 💾 SAVE NEW REFRESH TOKEN
     # =========================
-    from app.models.refresh_token import RefreshToken
-    from app.core.security import hash_refresh_token
+#     from app.models.refresh_token import RefreshToken
+#     from app.core.security import hash_refresh_token
 
-    new_token = RefreshToken(
-        user_id=user.id,
-        token_hash=hash_refresh_token(
-            new_refresh_token
-        ),
-        expires_at=(
-            datetime.utcnow()
-            + timedelta(days=365)
-        )
-    )
+#     new_token = RefreshToken(
+#         user_id=user.id,
+#         token_hash=hash_refresh_token(
+#             new_refresh_token
+#         ),
+#         expires_at=(
+#             datetime.utcnow()
+#             + timedelta(days=365)
+#         )
+#     )
 
-    db.add(new_token)
-    db.commit()
+#     db.add(new_token)
+#     db.commit()
 
-    return {
-        "access_token": access_token,
-        "refresh_token": new_refresh_token,
-        "token_type": "bearer",
-        "user_id": str(user.id)
-    }
-# =========================
+#     return {
+#         "access_token": access_token,
+#         "refresh_token": new_refresh_token,
+#         "token_type": "bearer",
+#         "user_id": str(user.id)
+#     }
+# # =========================
 # ✅ UPDATE PROFILE (FIXED)
 # =========================
 @router.put("/users/update-profile")
