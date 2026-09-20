@@ -1,21 +1,54 @@
-from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Form,
+    File,
+    UploadFile,
+    BackgroundTasks,
+)
+
 from sqlalchemy.orm import Session
+
 from datetime import datetime, timedelta
-import os, secrets, smtplib
+
+import os
+import secrets
+import smtplib
+
 from pydantic import BaseModel
+
 from app.models.user import User, ChefProfile
-from app.schemas.auth import ChefLoginSchema, ChangePasswordSchema
-from app.api.deps import get_db, get_current_user
-from app.utils.hashing import hash_password, verify_password
+
+from app.models.refresh_token import RefreshToken
+
+from app.schemas.auth import (
+    ChefLoginSchema,
+    ChangePasswordSchema,
+)
+
+from app.api.deps import (
+    get_db,
+    get_current_user,
+)
+
+from app.utils.hashing import (
+    hash_password,
+    verify_password,
+)
+
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     verify_refresh_token,
+    hash_refresh_token,
+    REFRESH_TOKEN_EXPIRE_DAYS,
 )
 
 import cloudinary.uploader
+
 from email.mime.text import MIMEText
-from fastapi import BackgroundTasks
+
 
 router = APIRouter()
 
@@ -120,11 +153,19 @@ async def signup(
 # =========================
 # ✅ LOGIN
 # =========================
+# =========================================================
+# LOGIN
+# =========================================================
+
 @router.post("/login")
 def login(
     user_data: ChefLoginSchema,
     db: Session = Depends(get_db)
 ):
+
+    # =====================================================
+    # FIND USER
+    # =====================================================
 
     user = (
         db.query(User)
@@ -133,54 +174,99 @@ def login(
         .first()
     )
 
+    # =====================================================
+    # CHECK CREDENTIALS
+    # =====================================================
+
     if not user or not verify_password(
         user_data.password,
         user.password
     ):
+
         raise HTTPException(
             status_code=400,
             detail="Invalid credentials"
         )
 
+    # =====================================================
+    # ACCOUNT CHECK
+    # =====================================================
+
     if not user.is_active:
+
         raise HTTPException(
             status_code=403,
             detail="Account is disabled"
         )
 
-    # =========================
-    # 👨‍🍳 ROLE CHECK
-    # =========================
+    # =====================================================
+    # ROLE CHECK
+    # =====================================================
+
     if user.role != "chef":
+
         raise HTTPException(
             status_code=403,
             detail="Not a chef account"
         )
 
-    # =========================
-    # ✅ APPROVAL CHECK
-    # =========================
+    # =====================================================
+    # APPROVAL CHECK
+    # =====================================================
+
     if user.application_status != "approved":
+
         raise HTTPException(
             status_code=403,
             detail="Your account is under review"
         )
 
-    # =========================
-    # 🔐 ACCESS TOKEN
-    # =========================
+    # =====================================================
+    # CREATE ACCESS TOKEN
+    # =====================================================
+
     access_token = create_access_token({
         "sub": str(user.id),
         "role": user.role
     })
 
-    # =========================
-    # 🔄 REFRESH TOKEN
-    # =========================
+    # =====================================================
+    # CREATE REFRESH TOKEN
+    # =====================================================
+
     refresh_token = create_refresh_token({
         "sub": str(user.id),
         "role": user.role
     })
+
+    # =====================================================
+    # SAVE REFRESH TOKEN IN DATABASE
+    # =====================================================
+
+    refresh_token_record = RefreshToken(
+        user_id=user.id,
+
+        token_hash=hash_refresh_token(
+            refresh_token
+        ),
+
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(
+                days=REFRESH_TOKEN_EXPIRE_DAYS
+            )
+        ),
+
+        is_revoked=False,
+    )
+
+    db.add(refresh_token_record)
+
+    db.commit()
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
     return {
         "access_token": access_token,
@@ -190,12 +276,10 @@ def login(
         "application_status": user.application_status
     }
     
-    
 # =========================
 # 🔄 REFRESH TOKEN SCHEMA
 # =========================
-class RefreshTokenRequest(BaseModel):
-    refresh_token: str
+
 
 
 # # =========================
@@ -204,30 +288,46 @@ class RefreshTokenRequest(BaseModel):
 # # =========================
 # # 🔄 CUSTOMER REFRESH TOKEN
 # # =========================
+# =========================================================
+# REFRESH TOKEN SCHEMA
+# =========================================================
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+# =========================================================
+# REFRESH ACCESS TOKEN
+# =========================================================
+
 @router.post("/refresh")
-def customer_refresh_access_token(
+def refresh_access_token(
     data: RefreshTokenRequest,
     db: Session = Depends(get_db)
 ):
 
-    # =========================
-    # 🔐 VERIFY REFRESH TOKEN
-    # =========================
+    # =====================================================
+    # 1. VERIFY JWT REFRESH TOKEN
+    # =====================================================
+
     payload = verify_refresh_token(
         data.refresh_token
     )
 
     user_id = payload.get("sub")
+    jti = payload.get("jti")
 
-    if not user_id:
+    if not user_id or not jti:
+
         raise HTTPException(
             status_code=401,
             detail="Invalid refresh token"
         )
 
-    # =========================
-    # 👤 FIND USER
-    # =========================
+    # =====================================================
+    # 2. FIND USER
+    # =====================================================
+
     user = (
         db.query(User)
         .filter(User.id == user_id)
@@ -235,36 +335,140 @@ def customer_refresh_access_token(
     )
 
     if not user:
+
         raise HTTPException(
             status_code=401,
             detail="User not found"
         )
 
-    # =========================
-    # 🚫 ACCOUNT CHECK
-    # =========================
+    # =====================================================
+    # 3. ACCOUNT CHECK
+    # =====================================================
+
     if not user.is_active:
+
         raise HTTPException(
             status_code=403,
             detail="Account is disabled"
         )
 
-    # =========================
-    # 🔐 NEW ACCESS TOKEN
-    # =========================
+    # =====================================================
+    # 4. HASH TOKEN
+    # =====================================================
+
+    incoming_token_hash = hash_refresh_token(
+        data.refresh_token
+    )
+
+    # =====================================================
+    # 5. FIND TOKEN IN DATABASE
+    # =====================================================
+
+    stored_token = (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.token_hash == incoming_token_hash,
+            RefreshToken.user_id == user.id,
+        )
+        .first()
+    )
+
+    # =====================================================
+    # TOKEN NOT FOUND
+    # =====================================================
+
+    if not stored_token:
+
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token not found"
+        )
+
+    # =====================================================
+    # 6. CHECK REVOCATION
+    # =====================================================
+
+    if stored_token.is_revoked:
+
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token revoked"
+        )
+
+    # =====================================================
+    # 7. CHECK DATABASE EXPIRY
+    # =====================================================
+
+    if stored_token.expires_at < datetime.utcnow():
+
+        stored_token.is_revoked = True
+
+        db.commit()
+
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token expired"
+        )
+
+    # =====================================================
+    # 8. REVOKE OLD REFRESH TOKEN
+    # =====================================================
+
+    stored_token.is_revoked = True
+
+    # =====================================================
+    # 9. CREATE NEW ACCESS TOKEN
+    # =====================================================
+
     access_token = create_access_token({
         "sub": str(user.id),
         "role": user.role
     })
 
-    # =========================
-    # 🔄 NEW REFRESH TOKEN
-    # =========================
+    # =====================================================
+    # 10. CREATE NEW REFRESH TOKEN
+    # =====================================================
+
     new_refresh_token = create_refresh_token({
         "sub": str(user.id),
         "role": user.role
     })
 
+    # =====================================================
+    # 11. SAVE NEW REFRESH TOKEN
+    # =====================================================
+
+    new_token = RefreshToken(
+        user_id=user.id,
+
+        token_hash=hash_refresh_token(
+            new_refresh_token
+        ),
+
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(
+                days=REFRESH_TOKEN_EXPIRE_DAYS
+            )
+        ),
+
+        is_revoked=False,
+    )
+
+    db.add(new_token)
+
+    db.commit()
+
+    # =====================================================
+    # 12. RETURN NEW TOKENS
+    # =====================================================
+
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+        "user_id": str(user.id)
+    }
     # =========================
     # 💾 SAVE NEW REFRESH TOKEN
     # =========================
