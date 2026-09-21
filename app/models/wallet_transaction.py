@@ -58,6 +58,19 @@ class WalletTransaction(Base):
         nullable=True,
         index=True,
     )
+    order_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("orders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    referral_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("referrals.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     schedule_id = Column(
         UUID(as_uuid=True),

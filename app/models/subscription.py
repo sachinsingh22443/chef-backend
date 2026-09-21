@@ -60,6 +60,15 @@ class Subscription(Base):
         nullable=False,
         index=True,
     )
+    
+    # 🔥 PAYMENT / ORDER LINK
+    order_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("orders.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
 
     # 🔥 BASIC INFO
     customer_name = Column(String)

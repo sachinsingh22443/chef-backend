@@ -8,27 +8,33 @@ from datetime import datetime
 # CREATE SUBSCRIPTION
 # frontend → backend
 # =========================================================
-
 class SubscriptionCreate(BaseModel):
+
+    # =====================================================
+    # PAYMENT / ORDER
+    # =====================================================
+    # Normal subscription must be linked with
+    # the paid order created before subscription.
+    order_id: UUID
+
+    # =====================================================
+    # BASIC
+    # =====================================================
     chef_id: UUID
     menu_id: UUID
-
     plan_id: str
     duration_days: int
-
     meals_per_day: int
 
     # =====================================================
     # BREAKFAST ADD-ON
     # =====================================================
-
     breakfast_enabled: bool = False
     breakfast_price: float = 0.0
 
     # =====================================================
     # DELIVERY
     # =====================================================
-
     delivery_days: List[str]
     delivery_time: str
     address: str
@@ -36,7 +42,6 @@ class SubscriptionCreate(BaseModel):
     # =====================================================
     # DATES
     # =====================================================
-
     start_date: datetime
     end_date: datetime
 
@@ -45,30 +50,43 @@ class SubscriptionCreate(BaseModel):
 # RESPONSE
 # backend → frontend
 # =========================================================
-
 class SubscriptionOut(BaseModel):
+
     id: UUID
 
     plan_id: str
+
     price: float
 
     meals_per_day: int
+
     dish_name: str
 
+    # =====================================================
     # BREAKFAST
+    # =====================================================
     breakfast_enabled: bool = False
     breakfast_price: float = 0.0
 
+    # =====================================================
     # DELIVERY
+    # =====================================================
     delivery_days: List[str]
+
     delivery_time: str
+
     address: str
 
+    # =====================================================
     # DATES
+    # =====================================================
     start_date: datetime
+
     end_date: datetime
 
+    # =====================================================
     # STATUS
+    # =====================================================
     status: str
 
     class Config:

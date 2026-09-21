@@ -6,7 +6,10 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app.api.deps import get_db, get_current_user
 from app.models.user import User
+import secrets
+import string
 
+from app.models.referral import Referral
 
 from app.services.msg91 import send_otp, verify_otp
 
@@ -61,25 +64,149 @@ def send(data: SendOtpSchema):
         detail=res
     )
 # SIGNUP
+# =========================================================
+# 📱 CUSTOMER SIGNUP
+# =========================================================
+
 @router.post("/signupapi")
-def signupapi(data: CustomerSignupSchema, db: Session = Depends(get_db)):
+def signupapi(
+    data: CustomerSignupSchema,
+    db: Session = Depends(get_db)
+):
+
+    # =====================================================
+    # 🔐 PASSWORD VALIDATION
+    # =====================================================
 
     if len(data.password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters"
+        )
 
-    otp_check = verify_otp(data.phone, data.otp)
+    # =====================================================
+    # 📲 OTP VERIFICATION
+    # =====================================================
+
+    otp_check = verify_otp(
+        data.phone,
+        data.otp
+    )
 
     if otp_check.get("type") != "success":
-        raise HTTPException(400, "Invalid OTP")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP"
+        )
+
+    # =====================================================
+    # 👤 CHECK EXISTING USER
+    # =====================================================
 
     existing = (
-      db.query(User)
-      .filter(User.phone == data.phone)
-      .limit(1)
-      .first()
+        db.query(User)
+        .filter(User.phone == data.phone)
+        .limit(1)
+        .first()
     )
+
     if existing:
-        raise HTTPException(400, "User already exists")
+        raise HTTPException(
+            status_code=400,
+            detail="User already exists"
+        )
+
+    # =====================================================
+    # 🎁 CLEAN REFERRAL CODE
+    # =====================================================
+
+    referral_code = None
+
+    if data.referral_code:
+
+        referral_code = data.referral_code.strip().upper()
+
+        if referral_code == "":
+            referral_code = None
+
+    # =====================================================
+    # 🎁 FIND REFERRER
+    # =====================================================
+
+    referrer = None
+
+    if referral_code:
+
+        referrer = (
+            db.query(User)
+            .filter(
+                User.referral_code == referral_code,
+                User.role == "customer",
+                User.is_active == True
+            )
+            .first()
+        )
+
+        # =================================================
+        # ❌ INVALID REFERRAL CODE
+        # =================================================
+
+        if not referrer:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid referral code"
+            )
+
+        # =================================================
+        # 🚫 SELF REFERRAL
+        # =================================================
+
+        if referrer.phone == data.phone:
+            raise HTTPException(
+                status_code=400,
+                detail="You cannot use your own referral code"
+            )
+
+    # =====================================================
+    # 🔑 GENERATE UNIQUE REFERRAL CODE
+    # FOR NEW CUSTOMER
+    # =====================================================
+
+    def generate_referral_code():
+
+        characters = string.ascii_uppercase + string.digits
+
+        for _ in range(20):
+
+            code = (
+                "EU"
+                + "".join(
+                    secrets.choice(characters)
+                    for _ in range(8)
+                )
+            )
+
+            exists = (
+                db.query(User.id)
+                .filter(
+                    User.referral_code == code
+                )
+                .first()
+            )
+
+            if not exists:
+                return code
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to generate referral code"
+        )
+
+    new_referral_code = generate_referral_code()
+
+    # =====================================================
+    # 👤 CREATE CUSTOMER
+    # =====================================================
 
     user = User(
         name="Customer",
@@ -87,38 +214,136 @@ def signupapi(data: CustomerSignupSchema, db: Session = Depends(get_db)):
         phone=data.phone,
         password=hash_password(data.password),
         role="customer",
-        is_verified=True
+        is_verified=True,
+        is_active=True,
+
+        # New customer's own referral code
+        referral_code=new_referral_code,
+
+        # Who referred this customer
+        referred_by=(
+            referrer.id
+            if referrer
+            else None
+        )
     )
 
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+
+        # =================================================
+        # 💾 ADD USER
+        # =================================================
+
+        db.add(user)
+
+        # Generate user.id before Referral creation
+        db.flush()
+
+        # =================================================
+        # 🎁 CREATE REFERRAL RECORD
+        # =================================================
+
+        if referrer:
+
+            referral = Referral(
+                referrer_id=referrer.id,
+                referred_user_id=user.id,
+
+                # Referral code actually used
+                referral_code=referral_code,
+
+                # Signup does NOT give reward
+                status="PENDING",
+
+                reward_amount=0.0,
+                reward_type=None,
+
+                order_id=None,
+                subscription_id=None,
+
+                rewarded_at=None,
+                cancelled_at=None,
+                cancellation_reason=None
+            )
+
+            db.add(referral)
+
+            # Execute DB constraints now
+            db.flush()
+
+        # =================================================
+        # 💾 COMMIT USER + REFERRAL TOGETHER
+        # =================================================
+
+        db.commit()
+
+        db.refresh(user)
+
+    except Exception as e:
+
+        db.rollback()
+
+        print(
+            "SIGNUP REFERRAL ERROR:",
+            str(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to create account. Please try again."
+        )
+
+    # =====================================================
+    # 🔐 ACCESS TOKEN
+    # =====================================================
 
     access_token = create_access_token({
-      "sub": str(user.id),
-      "role": user.role
+        "sub": str(user.id),
+        "role": user.role
     })
+
+    # =====================================================
+    # 🔄 REFRESH TOKEN
+    # =====================================================
 
     refresh_token = create_refresh_token({
-       "sub": str(user.id)
+        "sub": str(user.id)
     })
 
+    # =====================================================
+    # 💾 SAVE REFRESH TOKEN
+    # =====================================================
+
     db_token = RefreshToken(
-       user_id=user.id,
-       token_hash=hash_refresh_token(refresh_token),
-       expires_at=datetime.utcnow() + timedelta(days=365)
-       )
+        user_id=user.id,
+        token_hash=hash_refresh_token(
+            refresh_token
+        ),
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(days=365)
+        )
+    )
 
     db.add(db_token)
     db.commit()
 
+    # =====================================================
+    # ✅ RESPONSE
+    # =====================================================
+
     return {
-       "access_token": access_token,
+        "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user_id": str(user.id)
-        }
+        "user_id": str(user.id),
 
+        # New user's referral code
+        "referral_code": user.referral_code,
+
+        # True if another customer referred this user
+        "referral_applied": bool(referrer)
+    }
 
 # LOGIN
 

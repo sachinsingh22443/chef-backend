@@ -10,12 +10,15 @@ from app.core.cache import (
     delete_cache,
 )
 from app.models.wallet import Wallet
+from app.models.wallet_transaction import WalletTransaction
+from app.models.referral import Referral
 import uuid
 from app.models.notification import Notification
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
 from app.models.subscription_plan_menu_cycle import SubscriptionPlanMenuCycle
 from app.services.wallet import credit_wallet, debit_wallet
-
+from app.models.order import Order
+from app.models.order_item import OrderItem
 from app.api.deps import get_db, get_current_user
 from app.models.subscription import Subscription
 from app.models.subscription_plan import SubscriptionPlan
@@ -23,6 +26,7 @@ from app.schemas.subscription import SubscriptionCreate
 from app.schemas.subscription_plan import SubscriptionPlanOut
 from datetime import date, time, timedelta
 from zoneinfo import ZoneInfo
+
 IST = ZoneInfo("Asia/Kolkata")
 MEAL_CUTOFF_TIMES = {
     "breakfast": time(8, 0),
@@ -317,7 +321,178 @@ def create_meal_schedules(
 # 🔥 GET ALL PLANS (CUSTOMER)
 # =========================
 
+def process_subscription_referral_reward(
+    db: Session,
+    subscription: Subscription,
+):
+    """
+    Referral subscription reward.
 
+    7 days  -> ₹10
+    15 days -> ₹40
+    30 days -> ₹80
+
+    Important:
+    - One referred customer can receive only ONE referral reward.
+    - Referral must still be PENDING.
+    - Reward amount is decided by backend.
+    - Wallet + transaction + referral update happen
+      inside the same DB transaction.
+    """
+
+    # =====================================================
+    # 1. BASIC VALIDATION
+    # =====================================================
+
+    if not subscription.user_id:
+        return False
+
+    # =====================================================
+    # 2. FIND + LOCK REFERRAL
+    # =====================================================
+
+    referral = (
+        db.query(Referral)
+        .filter(
+            Referral.referred_user_id == subscription.user_id,
+            Referral.status == "PENDING",
+        )
+        .with_for_update()
+        .first()
+    )
+
+    if not referral:
+        return False
+
+    # =====================================================
+    # 3. EXTRA DUPLICATE PROTECTION
+    # =====================================================
+
+    # Already rewarded through an order
+    if referral.order_id is not None:
+        return False
+
+    # Already rewarded through another subscription
+    if referral.subscription_id is not None:
+        return False
+
+    # =====================================================
+    # 4. CALCULATE EXACT SUBSCRIPTION DURATION
+    # =====================================================
+
+    if not subscription.start_date:
+        return False
+
+    if not subscription.end_date:
+        return False
+
+    start_date = (
+        subscription.start_date.date()
+        if isinstance(subscription.start_date, datetime)
+        else subscription.start_date
+    )
+
+    end_date = (
+        subscription.end_date.date()
+        if isinstance(subscription.end_date, datetime)
+        else subscription.end_date
+    )
+
+    duration_days = (
+        end_date - start_date
+    ).days + 1
+
+    # =====================================================
+    # 5. BACKEND REWARD MAP
+    # =====================================================
+
+    reward_map = {
+        7: 10.0,
+        15: 40.0,
+        30: 80.0,
+    }
+
+    reward_amount = reward_map.get(duration_days)
+
+    # Only 7 / 15 / 30 day subscriptions qualify
+    if reward_amount is None:
+        return False
+
+    # =====================================================
+    # 6. GET REFERRER WALLET
+    # =====================================================
+
+    wallet = (
+        db.query(Wallet)
+        .filter(
+            Wallet.user_id == referral.referrer_id
+        )
+        .with_for_update()
+        .first()
+    )
+
+    # Create wallet if it doesn't exist
+    if not wallet:
+        wallet = Wallet(
+            user_id=referral.referrer_id,
+            balance=0.0,
+        )
+
+        db.add(wallet)
+        db.flush()
+
+    # =====================================================
+    # 7. CREDIT WALLET
+    # =====================================================
+
+    wallet.balance = (
+        float(wallet.balance or 0.0)
+        + reward_amount
+    )
+
+    # =====================================================
+    # 8. CREATE WALLET TRANSACTION
+    # =====================================================
+
+    wallet_transaction = WalletTransaction(
+        wallet_id=wallet.id,
+        user_id=referral.referrer_id,
+        amount=reward_amount,
+        transaction_type="referral_reward",
+        meal_type=None,
+        subscription_id=subscription.id,
+        order_id=None,
+        referral_id=referral.id,
+        schedule_id=None,
+        description=(
+            f"Referral reward ₹{int(reward_amount)} "
+            f"for {duration_days}-day subscription"
+        ),
+    )
+
+    db.add(wallet_transaction)
+
+    # =====================================================
+    # 9. MARK REFERRAL AS REWARDED
+    # =====================================================
+
+    referral.status = "REWARDED"
+
+    referral.reward_amount = reward_amount
+
+    referral.reward_type = (
+        f"subscription_{duration_days}_days"
+    )
+
+    referral.subscription_id = subscription.id
+
+    referral.rewarded_at = datetime.utcnow()
+
+    referral.cancelled_at = None
+
+    referral.cancellation_reason = None
+
+    return True
 
 # 🔥 distance function
 def calculate_distance(lat1, lon1, lat2, lon2):
@@ -679,215 +854,432 @@ def upcoming():
 # =========================
 from app.models.menu import Menu   # 🔥 जरूरी
 
+# =========================================================
+# 🔥 CREATE SUBSCRIPTION
+# =========================================================
+
 @router.post("/")
 def create_subscription(
     data: SubscriptionCreate,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    # =====================================================
-    # 1. BASIC VALIDATION
-    # =====================================================
+    try:
 
-    if data.meals_per_day <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid meals_per_day",
+        # =====================================================
+        # 1. BASIC VALIDATION
+        # =====================================================
+
+        if data.meals_per_day <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid meals_per_day",
+            )
+
+        if data.duration_days not in (7, 15, 30):
+            raise HTTPException(
+                status_code=400,
+                detail="Duration must be 7, 15 or 30 days",
+            )
+
+        if not data.start_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Start date is required",
+            )
+
+        # =====================================================
+        # 2. DELIVERY DAYS
+        # =====================================================
+
+        delivery_days = [
+            str(day).strip().lower()[:3]
+            for day in (data.delivery_days or [])
+        ]
+
+        if not delivery_days:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one delivery day is required",
+            )
+
+        delivery_days = list(
+            dict.fromkeys(delivery_days)
         )
 
-    if data.duration_days not in (7, 15, 30):
-        raise HTTPException(
-            status_code=400,
-            detail="Duration must be 7, 15 or 30 days",
+        # =====================================================
+        # 3. CALCULATE EXACT SUBSCRIPTION END DATE
+        # =====================================================
+
+        subscription_start_date = (
+            data.start_date.date()
+            if isinstance(data.start_date, datetime)
+            else data.start_date
         )
 
-    if not data.start_date:
-        raise HTTPException(
-            status_code=400,
-            detail="Start date is required",
+        calculated_end_date = (
+            subscription_start_date
+            + timedelta(days=data.duration_days - 1)
         )
 
-    # =====================================================
-    # 2. DELIVERY DAYS
-    # =====================================================
+        # =====================================================
+        # 4. 🔐 FETCH + LOCK PAID SUBSCRIPTION ORDER
+        # =====================================================
 
-    delivery_days = [
-        str(day).strip().lower()[:3]
-        for day in (data.delivery_days or [])
-    ]
-
-    if not delivery_days:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one delivery day is required",
+        order = (
+            db.query(Order)
+            .filter(
+                Order.id == data.order_id,
+                Order.user_id == user.id,
+            )
+            .with_for_update()
+            .first()
         )
 
-    # Remove duplicates while preserving order
-    delivery_days = list(dict.fromkeys(delivery_days))
+        if not order:
+            raise HTTPException(
+                status_code=404,
+                detail="Subscription order not found",
+            )
 
-    # =====================================================
-    # 3. CALCULATE EXACT SUBSCRIPTION END DATE
-    #
-    # 7  days = start + 6
-    # 15 days = start + 14
-    # 30 days = start + 29
-    # =====================================================
+        # =====================================================
+        # 5. 🔐 ORDER MUST BE SUBSCRIPTION ORDER
+        # =====================================================
 
-    subscription_start_date = (
-        data.start_date.date()
-        if isinstance(data.start_date, datetime)
-        else data.start_date
-    )
+        if not getattr(order, "is_subscription", False):
+            raise HTTPException(
+                status_code=400,
+                detail="This order is not a subscription order",
+            )
 
-    calculated_end_date = (
-        subscription_start_date
-        + timedelta(days=data.duration_days - 1)
-    )
+        # =====================================================
+        # 6. 🔐 PAYMENT MUST BE SUCCESSFUL
+        # =====================================================
 
-    # =====================================================
-    # 4. GET SELECTED MENU
-    # =====================================================
+        if order.payment_status != "paid":
+            raise HTTPException(
+                status_code=400,
+                detail="Subscription payment is not completed",
+            )
 
-    menu = (
-        db.query(Menu)
-        .filter(
-            Menu.id == data.menu_id,
-            Menu.is_deleted == False,
-        )
-        .first()
-    )
+        # =====================================================
+        # 7. 🔐 PAYMENT DATA MUST EXIST
+        # =====================================================
 
-    if not menu:
-        raise HTTPException(
-            status_code=404,
-            detail="Menu not found",
-        )
+        if not order.payment_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Payment verification is incomplete",
+            )
 
-    # =====================================================
-    # 5. CHECK PLAN
-    # =====================================================
+        if not order.razorpay_order_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Razorpay order is missing",
+            )
 
-    plan = (
-        db.query(SubscriptionPlan)
-        .filter(
-            SubscriptionPlan.id == data.plan_id,
-            SubscriptionPlan.chef_id == menu.chef_id,
-            SubscriptionPlan.is_active == True,
-        )
-        .first()
-    )
+        # =====================================================
+        # 8. 🔐 REFUND / CANCEL PROTECTION
+        # =====================================================
 
-    if not plan:
-        raise HTTPException(
-            status_code=404,
-            detail="Plan not found",
-        )
+        if getattr(order, "refund_status", None) in (
+            "refunded",
+            "processed",
+            "full_refund",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="This order has already been refunded",
+            )
 
-    # =====================================================
-    # 6. ACTIVE SUBSCRIPTION CHECK
-    # =====================================================
+        if getattr(order, "status", None) in (
+            "cancelled",
+            "canceled",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="This order has been cancelled",
+            )
 
-    existing = (
-        db.query(Subscription)
-        .filter(
-            Subscription.user_id == user.id,
-            Subscription.status == "active",
-        )
-        .first()
-    )
+        # =====================================================
+        # 9. 🔐 DUPLICATE SUBSCRIPTION PROTECTION
+        # =====================================================
 
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="Active subscription already exists",
+        existing_order_subscription = (
+            db.query(Subscription)
+            .filter(
+                Subscription.order_id == order.id
+            )
+            .with_for_update()
+            .first()
         )
 
-    # =====================================================
-    # 7. BREAKFAST PRICE SNAPSHOT
-    # =====================================================
+        if existing_order_subscription:
+            raise HTTPException(
+                status_code=400,
+                detail="This order is already linked to a subscription",
+            )
 
-    breakfast_price = 0.0
+        # =====================================================
+        # 10. GET SELECTED MENU
+        # =====================================================
 
-    if plan.breakfast_price is not None:
-        breakfast_price = float(
-            plan.breakfast_price
+        menu = (
+            db.query(Menu)
+            .filter(
+                Menu.id == data.menu_id,
+                Menu.is_deleted == False,
+            )
+            .first()
         )
 
-    # =====================================================
-    # 8. PLAN PRICE
-    #
-    # Keep your existing subscription plan calculation.
-    # =====================================================
+        if not menu:
+            raise HTTPException(
+                status_code=404,
+                detail="Menu not found",
+            )
 
-    daily_plan_price = float(plan.price or 0.0) / 30.0
+        # =====================================================
+        # 11. 🔐 MENU / ORDER CHEF VALIDATION
+        # =====================================================
 
-    duration_plan_price = (
-        daily_plan_price * data.duration_days
-    )
+        if order.chef_id != menu.chef_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Subscription menu does not match order chef",
+            )
 
-    breakfast_total = 0.0
+        # =====================================================
+        # 12. CHECK PLAN
+        # =====================================================
 
-    if data.breakfast_enabled:
-        breakfast_total = (
-            breakfast_price
+        plan = (
+            db.query(SubscriptionPlan)
+            .filter(
+                SubscriptionPlan.id == data.plan_id,
+                SubscriptionPlan.chef_id == menu.chef_id,
+                SubscriptionPlan.is_active == True,
+            )
+            .first()
+        )
+
+        if not plan:
+            raise HTTPException(
+                status_code=404,
+                detail="Plan not found",
+            )
+
+        # =====================================================
+        # 13. 🔐 PLAN DURATION VALIDATION
+        # =====================================================
+
+        if plan.duration_days is not None:
+
+            if int(plan.duration_days) != int(
+                data.duration_days
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Subscription duration does not match plan",
+                )
+
+        # =====================================================
+        # 14. 🔐 ORDER ITEM VALIDATION
+        # =====================================================
+
+        order_items = (
+            db.query(OrderItem)
+            .filter(
+                OrderItem.order_id == order.id
+            )
+            .all()
+        )
+
+        if len(order_items) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid subscription order items",
+            )
+
+        order_item = order_items[0]
+
+        if order_item.menu_id != data.menu_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Subscription menu does not match paid order",
+            )
+
+        if order_item.quantity != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid subscription quantity",
+            )
+
+        if order_item.special_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Tomorrow Special cannot be used for subscription",
+            )
+
+        # =====================================================
+        # 15. 🔐 BREAKFAST VALIDATION
+        # =====================================================
+
+        if data.breakfast_enabled:
+
+            if not plan.breakfast_available:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Breakfast is not available for this plan",
+                )
+
+        # =====================================================
+        # 16. ACTIVE SUBSCRIPTION CHECK
+        # =====================================================
+
+        existing = (
+            db.query(Subscription)
+            .filter(
+                Subscription.user_id == user.id,
+                Subscription.status == "active",
+            )
+            .first()
+        )
+
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail="Active subscription already exists",
+            )
+
+        # =====================================================
+        # 17. BREAKFAST PRICE SNAPSHOT
+        # =====================================================
+
+        breakfast_price = 0.0
+
+        if plan.breakfast_price is not None:
+            breakfast_price = float(
+                plan.breakfast_price
+            )
+
+        # =====================================================
+        # 18. PLAN PRICE
+        # =====================================================
+
+        daily_plan_price = (
+            float(plan.price or 0.0) / 30.0
+        )
+
+        duration_plan_price = (
+            daily_plan_price
             * data.duration_days
         )
 
-    total_price = (
-        duration_plan_price
-        + breakfast_total
-    )
+        breakfast_total = 0.0
 
-    # =====================================================
-    # 9. CREATE SUBSCRIPTION
-    # =====================================================
+        if data.breakfast_enabled:
+            breakfast_total = (
+                breakfast_price
+                * data.duration_days
+            )
 
-    sub = Subscription(
-        user_id=user.id,
-        chef_id=menu.chef_id,
+        total_price = (
+            duration_plan_price
+            + breakfast_total
+        )
 
-        # This is only the initially selected menu.
-        # Daily menus come from normal menu cycle.
-        menu_id=data.menu_id,
-
-        customer_name=user.name,
-        dish_name=menu.name,
-
-        plan_id=plan.id,
-
-        price=total_price,
-
-        meals_per_day=data.meals_per_day,
-
-        # Breakfast
-        breakfast_enabled=data.breakfast_enabled,
-        breakfast_price=breakfast_price,
-
-        # Delivery
-        delivery_days=delivery_days,
-        delivery_time=data.delivery_time,
-        address=data.address,
-
+        # =====================================================
+        # 19. 🔐 PAID ORDER AMOUNT VALIDATION
+        # =====================================================
+        #
         # IMPORTANT:
-        # duration_days decides end date
-        start_date=subscription_start_date,
-        end_date=calculated_end_date,
+        # Frontend amount is NEVER trusted here.
+        # Order.total_price is the paid amount.
+        #
 
-        status="active",
-    )
+        paid_amount = round(
+            float(order.total_price or 0.0),
+            2,
+        )
 
-    try:
+        expected_amount = round(
+            float(total_price),
+            2,
+        )
 
-        # =================================================
-        # SAVE SUBSCRIPTION
-        # =================================================
+        if abs(paid_amount - expected_amount) > 0.01:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Paid subscription amount does not "
+                    "match the subscription price"
+                ),
+            )
+
+        # =====================================================
+        # 20. CREATE SUBSCRIPTION
+        # =====================================================
+
+        sub = Subscription(
+
+            # Customer
+            user_id=user.id,
+
+            # Chef
+            chef_id=menu.chef_id,
+
+            # Initially selected menu
+            menu_id=data.menu_id,
+
+            # Customer snapshot
+            customer_name=user.name,
+            dish_name=menu.name,
+
+            # Plan
+            plan_id=plan.id,
+
+            # 🔥 IMPORTANT:
+            # Actual paid subscription order
+            order_id=order.id,
+
+            # Backend calculated price
+            price=expected_amount,
+
+            meals_per_day=data.meals_per_day,
+
+            # Breakfast
+            breakfast_enabled=data.breakfast_enabled,
+            breakfast_price=(
+                breakfast_price
+                if data.breakfast_enabled
+                else 0.0
+            ),
+
+            # Delivery
+            delivery_days=delivery_days,
+            delivery_time=data.delivery_time,
+            address=data.address,
+
+            # Dates
+            start_date=subscription_start_date,
+            end_date=calculated_end_date,
+
+            # Status
+            status="active",
+        )
+
+        # =====================================================
+        # 21. ATOMIC TRANSACTION
+        # =====================================================
 
         db.add(sub)
         db.flush()
 
-        # =================================================
-        # CREATE DAILY SCHEDULES
-        # =================================================
+        # =====================================================
+        # 22. CREATE DAILY MEAL SCHEDULES
+        # =====================================================
 
         create_meal_schedules(
             db=db,
@@ -895,9 +1287,9 @@ def create_subscription(
             plan=plan,
         )
 
-        # =================================================
-        # CUSTOMER NOTIFICATION
-        # =================================================
+        # =====================================================
+        # 23. CUSTOMER NOTIFICATION
+        # =====================================================
 
         customer_notification = Notification(
             user_id=user.id,
@@ -909,9 +1301,9 @@ def create_subscription(
             ),
         )
 
-        # =================================================
-        # CHEF NOTIFICATION
-        # =================================================
+        # =====================================================
+        # 24. CHEF NOTIFICATION
+        # =====================================================
 
         chef_notification = Notification(
             user_id=menu.chef_id,
@@ -926,63 +1318,76 @@ def create_subscription(
         db.add(customer_notification)
         db.add(chef_notification)
 
-        # =================================================
-        # COMMIT
-        # =================================================
+        # =====================================================
+        # 25. 🎁 REFERRAL REWARD
+        # =====================================================
+        #
+        # IMPORTANT:
+        # This runs ONLY for the original subscription purchase.
+        #
+        # Breakfast add-on payment does NOT call this function.
+        #
+
+        referral_reward_given = (
+            process_subscription_referral_reward(
+                db=db,
+                subscription=sub,
+            )
+        )
+
+        # =====================================================
+        # 26. ATOMIC COMMIT
+        # =====================================================
 
         db.commit()
         db.refresh(sub)
 
-        # =================================================
-        # CLEAR CACHE
-        # =================================================
-
         # =====================================================
-# CLEAR ALL SUBSCRIPTION CACHES
-# =====================================================
+        # 27. CLEAR SUBSCRIPTION CACHES
+        # =====================================================
 
         delete_cache(
-           f"subscription:my:{user.id}"
+            f"subscription:my:{user.id}"
         )
 
         delete_cache(
-           f"subscription:active:{user.id}"
+            f"subscription:active:{user.id}"
         )
 
         delete_cache(
             f"subscription:chef:{menu.chef_id}"
         )
 
-# =====================================================
-# TODAY MEALS CACHE
-# =====================================================
+        # =====================================================
+        # TODAY MEALS CACHE
+        # =====================================================
 
         delete_cache(
-           f"subscription:today:"
-           f"{sub.id}:"
-           f"{user.id}"
+            f"subscription:today:"
+            f"{sub.id}:"
+            f"{user.id}"
         )
 
         delete_cache(
-          f"subscription:today:v2:"
-          f"{sub.id}:"
-          f"{user.id}"
+            f"subscription:today:v2:"
+            f"{sub.id}:"
+            f"{user.id}"
         )
 
-# =====================================================
-# MENU CYCLE CACHE
-# =====================================================
+        # =====================================================
+        # MENU CYCLE CACHE
+        # =====================================================
 
         delete_cache(
-          f"subscription:menu-cycle:"
-          f"{sub.id}:"
-          f"{user.id}"
-)
+            f"subscription:menu-cycle:"
+            f"{sub.id}:"
+            f"{user.id}"
+        )
 
         delete_cache(
-           f"subscription:menu-cycle:v2:"
-           f"{sub.id}:"
-           f"{user.id}"
+            f"subscription:menu-cycle:v2:"
+            f"{sub.id}:"
+            f"{user.id}"
         )
 
         delete_cache(
@@ -991,15 +1396,15 @@ def create_subscription(
             f"{user.id}"
         )
 
-        delete_cache(         
-           f"subscription:menu-cycle:v4:"
-           f"{sub.id}:"
-           f"{user.id}"
+        delete_cache(
+            f"subscription:menu-cycle:v4:"
+            f"{sub.id}:"
+            f"{user.id}"
         )
 
-# =====================================================
-# SUBSCRIPTION MEALS CACHE
-# =====================================================
+        # =====================================================
+        # SUBSCRIPTION MEALS CACHE
+        # =====================================================
 
         delete_cache(
             f"subscription:meals:"
@@ -1013,6 +1418,10 @@ def create_subscription(
             f"{user.id}:True"
         )
 
+        # =====================================================
+        # RESPONSE
+        # =====================================================
+
         return {
             "success": True,
             "msg": "Subscription created",
@@ -1020,6 +1429,7 @@ def create_subscription(
             "duration_days": data.duration_days,
             "start_date": subscription_start_date,
             "end_date": calculated_end_date,
+            "referral_reward_given": referral_reward_given,
         }
 
     except HTTPException:
@@ -1027,6 +1437,7 @@ def create_subscription(
         raise
 
     except Exception as e:
+
         db.rollback()
 
         logger.exception(

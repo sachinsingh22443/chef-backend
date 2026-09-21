@@ -36,6 +36,7 @@ from app.models import (
     subscription_plan_menu_cycle,
     wallet,
     wallet_transaction,
+    referral,
     menu_cycle,
     menu_date_override,
     tomorrow_special_pre_order,

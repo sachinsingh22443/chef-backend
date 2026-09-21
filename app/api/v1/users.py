@@ -1,11 +1,17 @@
 from fastapi import APIRouter, Depends
+
 from sqlalchemy.orm import Session
+
 from sqlalchemy import func
+
 from app.core.cache import get_cache, set_cache
 
 from app.api.deps import get_current_user, get_db
+
 from app.models.order import Order
+
 from app.models.review import Review
+
 
 router = APIRouter()
 
@@ -23,6 +29,7 @@ def get_profile(
     - Cache HIT avoids profile/order/rating DB queries
     - Customer order count remains dynamic after cache expiry
     - Chef rating remains dynamic after cache expiry
+    - Referral code included
     - Existing response structure preserved
     """
 
@@ -30,7 +37,9 @@ def get_profile(
     # REDIS CACHE
     # =====================================================
 
-    cache_key = f"profile:v1:user:{current_user.id}"
+    # v2 so old cached profile responses without referral_code
+    # are not returned.
+    cache_key = f"profile:v2:user:{current_user.id}"
 
     cached = get_cache(cache_key)
 
@@ -115,24 +124,49 @@ def get_profile(
 
     response = {
         "id": str(current_user.id),
+
         "name": current_user.name,
+
         "email": current_user.email,
+
         "phone": current_user.phone,
+
         "role": current_user.role,
 
-        # Chef fields
+        # =================================================
+        # REFERRAL
+        # =================================================
+
+        "referral_code": current_user.referral_code,
+
+        # =================================================
+        # CHEF FIELDS
+        # =================================================
+
         "bio": chef.bio if chef else None,
+
         "location": chef.location if chef else None,
+
         "specialties": chef.specialties if chef else None,
 
-        # Profile image
+        # =================================================
+        # PROFILE IMAGE
+        # =================================================
+
         "profile_image": profile_image,
 
-        # Statistics
+        # =================================================
+        # STATISTICS
+        # =================================================
+
         "total_orders": total_orders,
+
         "avg_rating": avg_rating,
 
-        # Join date
+        # =================================================
+        # JOIN DATE
+        # =================================================
+
         "join_date": (
             current_user.created_at.strftime("%d %b %Y")
             if current_user.created_at

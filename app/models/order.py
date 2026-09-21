@@ -51,6 +51,12 @@ class Order(Base):
     )
 
     address = Column(String)
+    is_subscription = Column(
+       Boolean,
+       default=False,
+       nullable=False,
+       index=True,
+    )
 
     payment_method = Column(String)
 
@@ -64,6 +70,12 @@ class Order(Base):
         String,
         nullable=True,
         index=True
+    )
+    razorpay_order_id = Column(
+       String,
+       nullable=True,
+       unique=True,
+       index=True
     )
 
     refund_status = Column(
