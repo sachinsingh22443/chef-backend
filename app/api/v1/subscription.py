@@ -26,7 +26,7 @@ from app.schemas.subscription import SubscriptionCreate
 from app.schemas.subscription_plan import SubscriptionPlanOut
 from datetime import date, time, timedelta
 from zoneinfo import ZoneInfo
-
+from typing import  Optional
 IST = ZoneInfo("Asia/Kolkata")
 MEAL_CUTOFF_TIMES = {
     "breakfast": time(8, 0),
@@ -1351,7 +1351,7 @@ def create_subscription(
         )
 
         delete_cache(
-            f"subscription:active:{user.id}"
+            f"subscription:active:v2:{user.id}"
         )
 
         delete_cache(
@@ -1407,13 +1407,13 @@ def create_subscription(
         # =====================================================
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{sub.id}:"
             f"{user.id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{sub.id}:"
             f"{user.id}:True"
         )
@@ -1658,9 +1658,21 @@ def my_active_subscription(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    cache_key = f"subscription:active:{user.id}"
+    """
+    CUSTOMER ACTIVE SUBSCRIPTION
 
-    # CACHE HIT
+    Active means:
+    - status == active
+    - start_date <= today
+    - end_date >= today
+    """
+
+    # =====================================================
+    # CACHE
+    # =====================================================
+
+    cache_key = f"subscription:active:v2:{user.id}"
+
     cached = get_cache(cache_key)
 
     if cached is not None:
@@ -1670,13 +1682,64 @@ def my_active_subscription(
         )
         return cached
 
-    # DATABASE
-    active = db.query(Subscription).filter(
-        Subscription.user_id == user.id,
-        Subscription.status == "active"
-    ).first()
+    # =====================================================
+    # TODAY - INDIA
+    # =====================================================
+
+    today = datetime.now(IST).date()
+
+    # =====================================================
+    # FIND ACTIVE SUBSCRIPTION
+    # =====================================================
+
+    subscriptions = (
+        db.query(Subscription)
+        .filter(
+            Subscription.user_id == user.id,
+            Subscription.status == "active",
+        )
+        .order_by(
+            Subscription.end_date.desc()
+        )
+        .all()
+    )
+
+    active = None
+
+    for subscription in subscriptions:
+
+        start_date = (
+            subscription.start_date.date()
+            if isinstance(
+                subscription.start_date,
+                datetime
+            )
+            else subscription.start_date
+        )
+
+        end_date = (
+            subscription.end_date.date()
+            if isinstance(
+                subscription.end_date,
+                datetime
+            )
+            else subscription.end_date
+        )
+
+        if (
+            start_date
+            and end_date
+            and start_date <= today <= end_date
+        ):
+            active = subscription
+            break
+
+    # =====================================================
+    # NO ACTIVE SUBSCRIPTION
+    # =====================================================
 
     if not active:
+
         response = {
             "has_active_subscription": False
         }
@@ -1689,9 +1752,16 @@ def my_active_subscription(
 
         return response
 
+    # =====================================================
+    # ACTIVE RESPONSE
+    # =====================================================
+
     response = {
         "has_active_subscription": True,
-        "end_date": active.end_date
+        "id": str(active.id),
+        "start_date": active.start_date,
+        "end_date": active.end_date,
+        "status": "active",
     }
 
     set_cache(
@@ -1870,6 +1940,320 @@ def my_subscriptions(
 # GET TODAY'S MEAL SCHEDULE WITH MENU DETAILS
 # =========================================================
 
+
+# =========================================================
+# CUSTOMER SUBSCRIPTION HISTORY
+# =========================================================
+#
+# Supported:
+#   /my-history
+#   /my-history?specific_date=2026-09-15
+#   /my-history?from_date=2026-09-01&to_date=2026-09-30
+#   /my-history?page=1&limit=10
+#
+# History contains subscriptions whose end_date has passed.
+# =========================================================
+
+@router.get("/my-history")
+def my_subscription_history(
+    specific_date: Optional[date] = Query(
+        None,
+        description="Show subscriptions ending on this exact date",
+    ),
+    from_date: Optional[date] = Query(
+        None,
+        description="History start date",
+    ),
+    to_date: Optional[date] = Query(
+        None,
+        description="History end date",
+    ),
+    page: int = Query(
+        1,
+        ge=1,
+    ),
+    limit: int = Query(
+        10,
+        ge=1,
+        le=50,
+    ),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    CUSTOMER SUBSCRIPTION HISTORY
+
+    Returns expired subscriptions only.
+
+    Date filtering is based on subscription.end_date.
+    """
+
+    # =====================================================
+    # VALIDATE FILTERS
+    # =====================================================
+
+    if specific_date and (
+        from_date is not None
+        or to_date is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Use either specific_date or from_date/to_date",
+        )
+
+    if (
+        from_date
+        and to_date
+        and from_date > to_date
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="from_date cannot be after to_date",
+        )
+
+    # =====================================================
+    # CACHE KEY
+    # =====================================================
+
+    cache_key = (
+        f"subscription:history:v1:"
+        f"{user.id}:"
+        f"{specific_date}:"
+        f"{from_date}:"
+        f"{to_date}:"
+        f"{page}:"
+        f"{limit}"
+    )
+
+    cached = get_cache(cache_key)
+
+    if cached is not None:
+        logger.info(
+            "✅ Subscription History Cache HIT: %s",
+            cache_key,
+        )
+        return cached
+
+    # =====================================================
+    # TODAY - INDIA
+    # =====================================================
+
+    today = datetime.now(IST).date()
+
+    # =====================================================
+    # BASE QUERY
+    # =====================================================
+
+    query = (
+        db.query(
+            Subscription,
+            SubscriptionPlan,
+            User,
+        )
+        .outerjoin(
+            SubscriptionPlan,
+            SubscriptionPlan.id == Subscription.plan_id,
+        )
+        .outerjoin(
+            User,
+            User.id == Subscription.chef_id,
+        )
+        .filter(
+            Subscription.user_id == user.id,
+
+            # Only expired subscriptions
+            Subscription.end_date < today,
+        )
+    )
+
+    # =====================================================
+    # SPECIFIC DATE
+    # =====================================================
+
+    if specific_date:
+
+        query = query.filter(
+            Subscription.end_date == specific_date
+        )
+
+    # =====================================================
+    # DATE RANGE
+    # =====================================================
+
+    else:
+
+        if from_date:
+
+            query = query.filter(
+                Subscription.end_date >= from_date
+            )
+
+        if to_date:
+
+            query = query.filter(
+                Subscription.end_date <= to_date
+            )
+
+    # =====================================================
+    # TOTAL
+    # =====================================================
+
+    total = query.count()
+
+    # =====================================================
+    # PAGINATION
+    # =====================================================
+
+    offset = (page - 1) * limit
+
+    rows = (
+        query
+        .order_by(
+            Subscription.end_date.desc(),
+            Subscription.start_date.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
+    items = []
+
+    for subscription, plan, chef in rows:
+
+        start_date_value = (
+            subscription.start_date.date()
+            if isinstance(
+                subscription.start_date,
+                datetime
+            )
+            else subscription.start_date
+        )
+
+        end_date_value = (
+            subscription.end_date.date()
+            if isinstance(
+                subscription.end_date,
+                datetime
+            )
+            else subscription.end_date
+        )
+
+        items.append({
+
+            "id": str(subscription.id),
+
+            "plan": (
+                plan.title
+                if plan
+                else "Subscription Plan"
+            ),
+
+            "plan_type": (
+                plan.plan_type
+                if plan
+                else None
+            ),
+
+            "chefName": (
+                chef.name
+                if chef
+                else "Chef"
+            ),
+
+            "startDate": (
+                subscription.start_date.strftime(
+                    "%b %d, %Y"
+                )
+                if subscription.start_date
+                else None
+            ),
+
+            "endDate": (
+                subscription.end_date.strftime(
+                    "%b %d, %Y"
+                )
+                if subscription.end_date
+                else None
+            ),
+
+            # ISO dates for frontend filtering
+            "start_date": (
+                start_date_value.isoformat()
+                if start_date_value
+                else None
+            ),
+
+            "end_date": (
+                end_date_value.isoformat()
+                if end_date_value
+                else None
+            ),
+
+            "time": subscription.delivery_time,
+
+            "days": (
+                subscription.delivery_days
+                or []
+            ),
+
+            "status": "expired",
+
+            "price": subscription.price,
+
+            "breakfast_enabled": (
+                subscription.breakfast_enabled
+            ),
+
+            "breakfast_price": (
+                subscription.breakfast_price
+            ),
+
+            "meals_per_day": (
+                subscription.meals_per_day
+            ),
+        })
+
+    # =====================================================
+    # PAGINATION INFO
+    # =====================================================
+
+    has_next = (
+        offset + len(items)
+    ) < total
+
+    response = {
+        "items": items,
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "has_next": has_next,
+    }
+
+    # =====================================================
+    # CACHE
+    # =====================================================
+
+    set_cache(
+        cache_key,
+        response,
+        ttl=30,
+    )
+
+    logger.info(
+        "💾 Subscription History Cached: "
+        "user=%s total=%s page=%s",
+        user.id,
+        total,
+        page,
+    )
+
+    return response
+
 @router.get("/{subscription_id}/meals/today")
 def get_today_meals(
     subscription_id: UUID,
@@ -1880,6 +2264,7 @@ def get_today_meals(
     TODAY'S SUBSCRIPTION MEALS
 
     IMPORTANT:
+    - Subscription must be active today.
     - Normal Menu is the source of truth.
     - Do NOT trust schedule.menu_id for display.
     - Resolve today's menu again using:
@@ -1932,6 +2317,47 @@ def get_today_meals(
     today = datetime.now(IST).date()
 
     # =====================================================
+    # ACTIVE SUBSCRIPTION PROTECTION
+    # =====================================================
+
+    if (
+        subscription.status != "active"
+        or not subscription.start_date
+        or not subscription.end_date
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Subscription is not active",
+        )
+
+    subscription_start_date = (
+        subscription.start_date.date()
+        if isinstance(
+            subscription.start_date,
+            datetime,
+        )
+        else subscription.start_date
+    )
+
+    subscription_end_date = (
+        subscription.end_date.date()
+        if isinstance(
+            subscription.end_date,
+            datetime,
+        )
+        else subscription.end_date
+    )
+
+    if (
+        today < subscription_start_date
+        or today > subscription_end_date
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Subscription is not active",
+        )
+
+    # =====================================================
     # GET TODAY'S SCHEDULES
     # =====================================================
 
@@ -1976,8 +2402,7 @@ def get_today_meals(
         ).lower().strip()
 
         # =================================================
-        # IMPORTANT:
-        # GET NORMAL MENU USING TODAY + MEAL TYPE
+        # GET NORMAL MENU
         # =================================================
 
         menu, source = get_menu_for_day(
@@ -2164,21 +2589,22 @@ def get_subscription_meals(
 
     IMPORTANT BUSINESS RULES:
 
-    1. Normal Menu is the ONLY menu source.
-    2. Subscription menu uses the SAME Normal Menu records.
-    3. Normal Menu price is NEVER modified.
-    4. Subscription price = Normal Menu price - ₹10.
-    5. Default view = first 7 calendar days.
-    6. view_all=True = complete subscription duration.
-    7. 7-day subscription  = exactly 7 days.
-    8. 15-day subscription = exactly 15 days.
-    9. 30-day subscription = exactly 30 days.
-    10. Delivery days do NOT remove dates from subscription menu.
-    11. Breakfast is shown only when breakfast_enabled=True.
-    12. Each date resolves its own Normal Menu using:
+    1. Subscription must be active today.
+    2. Normal Menu is the ONLY menu source.
+    3. Subscription menu uses the SAME Normal Menu records.
+    4. Normal Menu price is NEVER modified.
+    5. Subscription price = Normal Menu price - ₹10.
+    6. Default view = first 7 calendar days.
+    7. view_all=True = complete subscription duration.
+    8. 7-day subscription  = exactly 7 days.
+    9. 15-day subscription = exactly 15 days.
+    10. 30-day subscription = exactly 30 days.
+    11. Delivery days do NOT remove dates from subscription menu.
+    12. Breakfast is shown only when breakfast_enabled=True.
+    13. Each date resolves its own Normal Menu using:
             date + meal_type
         through get_menu_for_day().
-    13. SubscriptionMealSchedule is used only for:
+    14. SubscriptionMealSchedule is used only for:
             - status
             - cutoff_at
             - schedule_id
@@ -2231,20 +2657,27 @@ def get_subscription_meals(
             )
 
         # =====================================================
-        # 3. VALIDATE DATES
+        # 3. TODAY - INDIA
+        # =====================================================
+
+        today = datetime.now(IST).date()
+
+        # =====================================================
+        # 4. ACTIVE SUBSCRIPTION PROTECTION
         # =====================================================
 
         if (
-            not subscription.start_date
+            subscription.status != "active"
+            or not subscription.start_date
             or not subscription.end_date
         ):
             raise HTTPException(
-                status_code=400,
-                detail="Subscription dates are not configured",
+                status_code=403,
+                detail="Subscription is not active",
             )
 
         # =====================================================
-        # 4. NORMALIZE START DATE
+        # 5. NORMALIZE START DATE
         # =====================================================
 
         subscription_start_date = (
@@ -2257,7 +2690,7 @@ def get_subscription_meals(
         )
 
         # =====================================================
-        # 5. NORMALIZE END DATE
+        # 6. NORMALIZE END DATE
         # =====================================================
 
         subscription_end_date = (
@@ -2270,7 +2703,20 @@ def get_subscription_meals(
         )
 
         # =====================================================
-        # 6. VALIDATE DATE RANGE
+        # 7. ACTIVE DATE CHECK
+        # =====================================================
+
+        if (
+            today < subscription_start_date
+            or today > subscription_end_date
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Subscription is not active",
+            )
+
+        # =====================================================
+        # 8. VALIDATE DATE RANGE
         # =====================================================
 
         if subscription_end_date < subscription_start_date:
@@ -2280,7 +2726,7 @@ def get_subscription_meals(
             )
 
         # =====================================================
-        # 7. EXACT SUBSCRIPTION DURATION
+        # 9. EXACT SUBSCRIPTION DURATION
         #
         # 7  days = start + 6
         # 15 days = start + 14
@@ -2298,12 +2744,11 @@ def get_subscription_meals(
         )
 
         # =====================================================
-        # 8. LOAD EXISTING SCHEDULES
+        # 10. LOAD EXISTING SCHEDULES
         #
-        # IMPORTANT:
         # Schedules are NOT used to decide which dates exist.
         #
-        # They are used only for:
+        # Used only for:
         # - status
         # - cutoff_at
         # - schedule_id
@@ -2319,7 +2764,7 @@ def get_subscription_meals(
         )
 
         # =====================================================
-        # 9. BUILD SCHEDULE LOOKUP
+        # 11. BUILD SCHEDULE LOOKUP
         # =====================================================
 
         schedule_map = {}
@@ -2347,7 +2792,7 @@ def get_subscription_meals(
             ] = schedule
 
         # =====================================================
-        # 10. MEALS TO SHOW
+        # 12. MEALS TO SHOW
         # =====================================================
 
         meals_to_show = [
@@ -2362,7 +2807,7 @@ def get_subscription_meals(
             )
 
         # =====================================================
-        # 11. MEAL ORDER
+        # 13. MEAL ORDER
         # =====================================================
 
         meal_order = {
@@ -2372,13 +2817,13 @@ def get_subscription_meals(
         }
 
         # =====================================================
-        # 12. HOW MANY DAYS TO DISPLAY
+        # 14. HOW MANY DAYS TO DISPLAY
         #
         # DEFAULT:
         #   7 days
         #
         # VIEW ALL:
-        #   complete subscription
+        #   Complete subscription
         # =====================================================
 
         display_days = (
@@ -2391,17 +2836,13 @@ def get_subscription_meals(
         )
 
         # =====================================================
-        # 13. BUILD DATES FROM SUBSCRIPTION START DATE
+        # 15. BUILD DATES
         #
-        # IMPORTANT:
+        # Delivery days are NOT checked here.
         #
-        # DO NOT CHECK delivery_days.
-        #
-        # Therefore:
-        #
-        # 7 day subscription  -> 7 dates
-        # 15 day subscription -> 15 dates
-        # 30 day subscription -> 30 dates
+        # 7 day  -> 7 dates
+        # 15 day -> 15 dates
+        # 30 day -> 30 dates
         # =====================================================
 
         result_days = []
@@ -2414,7 +2855,7 @@ def get_subscription_meals(
         ):
 
             # =================================================
-            # 14. BUILD MEALS
+            # BUILD MEALS
             # =================================================
 
             meals = []
@@ -2434,10 +2875,6 @@ def get_subscription_meals(
 
                 # =============================================
                 # GET NORMAL MENU
-                #
-                # THIS IS THE MOST IMPORTANT PART
-                #
-                # Same logic as Normal Menu.
                 # =============================================
 
                 menu, source = get_menu_for_day(
@@ -2461,14 +2898,7 @@ def get_subscription_meals(
                 # =============================================
                 # SUBSCRIPTION PRICE
                 #
-                # NORMAL MENU:
-                # ₹100
-                #
-                # SUBSCRIPTION:
-                # ₹90
-                #
-                # IMPORTANT:
-                # menu.price IS NEVER changed.
+                # NORMAL MENU PRICE - ₹10
                 # =============================================
 
                 subscription_price = max(
@@ -2503,7 +2933,7 @@ def get_subscription_meals(
                         # Subscription price
                         "price": subscription_price,
 
-                        # Original Normal Menu price
+                        # Original normal price
                         "normal_price": normal_price,
 
                         # Discounted subscription price
@@ -2675,7 +3105,7 @@ def get_subscription_meals(
                 )
 
             # =================================================
-            # 15. BREAKFAST → LUNCH → DINNER
+            # BREAKFAST → LUNCH → DINNER
             # =================================================
 
             meals.sort(
@@ -2686,7 +3116,7 @@ def get_subscription_meals(
             )
 
             # =================================================
-            # 16. ADD DAY
+            # ADD DAY
             # =================================================
 
             result_days.append(
@@ -2707,7 +3137,7 @@ def get_subscription_meals(
             current_date += timedelta(days=1)
 
         # =====================================================
-        # 17. FINAL RESPONSE
+        # 16. FINAL RESPONSE
         # =====================================================
 
         response = {
@@ -2743,7 +3173,7 @@ def get_subscription_meals(
         }
 
         # =====================================================
-        # 18. CACHE
+        # 17. CACHE
         # =====================================================
 
         set_cache(
@@ -4065,13 +4495,13 @@ async def turn_meal_off(
         # =================================================
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{user.id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{user.id}:True"
         )
@@ -4477,13 +4907,13 @@ async def turn_meal_on(
         # =================================================
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{user.id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{user.id}:True"
         )
@@ -5185,7 +5615,7 @@ def verify_breakfast_payment(
         # =========================================
 
         delete_cache(
-            f"subscription:active:{user.id}"
+            f"subscription:active:v2:{user.id}"
         )
 
         # =========================================
@@ -5209,13 +5639,13 @@ def verify_breakfast_payment(
         # =========================================
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{user.id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{user.id}:True"
         )
@@ -5476,13 +5906,13 @@ def save_subscription_plan_menu_cycle(
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:True"
         )
@@ -5847,7 +6277,7 @@ def admin_update_subscription_status(
         )
 
         delete_cache(
-            f"subscription:active:{subscription.user_id}"
+            f"subscription:active:v2:{subscription.user_id}"
         )
 
         delete_cache(
@@ -5863,13 +6293,13 @@ def admin_update_subscription_status(
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:True"
         )
@@ -5977,13 +6407,13 @@ def admin_update_subscription_diet(
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:True"
         )
@@ -6062,7 +6492,7 @@ def admin_update_subscription_breakfast(
         )
 
         delete_cache(
-            f"subscription:active:{subscription.user_id}"
+            f"subscription:active:v2:{subscription.user_id}"
         )
 
         delete_cache(
@@ -6078,13 +6508,13 @@ def admin_update_subscription_breakfast(
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:False"
         )
 
         delete_cache(
-            f"subscription:meals:"
+            f"subscription:meals:v5:"
             f"{subscription.id}:"
             f"{subscription.user_id}:True"
         )
