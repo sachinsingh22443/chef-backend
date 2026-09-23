@@ -1074,6 +1074,7 @@ async def create_order(
             "cod",
             "card",
             "upi",
+            "wallet",
         ]:
             raise HTTPException(
                 status_code=400,
@@ -1835,11 +1836,77 @@ async def create_order(
         order.is_subscription = bool(
             data.is_subscription
         )
-
         # =====================================================
-        # 💾 COMMIT
+        # 👛 WALLET PAYMENT
         # =====================================================
-
+        
+        if data.payment_method == "wallet":
+        
+            # Lock wallet row to prevent double spending
+            wallet = (
+                db.query(Wallet)
+                .filter(
+                    Wallet.user_id == user.id
+                )
+                .with_for_update()
+                .first()
+            )
+        
+            # Wallet must exist
+            if not wallet:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Wallet not found. "
+                        "Please add money to your wallet first."
+                    )
+                )
+        
+            wallet_balance = float(
+                wallet.balance or 0
+            )
+        
+            payable_amount = float(
+                total_price or 0
+            )
+        
+            # Check balance
+            if wallet_balance < payable_amount:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Insufficient wallet balance. "
+                        f"Available ₹{wallet_balance:.2f}, "
+                        f"required ₹{payable_amount:.2f}"
+                    )
+                )
+        
+            # Deduct wallet balance
+            wallet.balance = (
+                wallet_balance - payable_amount
+            )
+        
+            # Create wallet transaction
+            wallet_transaction = WalletTransaction(
+                wallet_id=wallet.id,
+                user_id=user.id,
+                amount=payable_amount,
+                transaction_type="payment",
+                meal_type=None,
+                subscription_id=None,
+                order_id=order.id,
+                referral_id=None,
+                schedule_id=None,
+                description=(
+                    f"Wallet payment for order {order.id}"
+                ),
+            )
+        
+            db.add(wallet_transaction)
+        
+            # Mark order as paid
+            order.payment_status = "paid"
+        
         db.commit()
 
         # =====================================================
