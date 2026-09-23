@@ -32,8 +32,13 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 # 🍽️ MENU CYCLE RESOLVER
 # =========================================================
 
+# =========================================================
+# 🍽️ MENU CYCLE RESOLVER
+# =========================================================
+
 INDIA_TZ = ZoneInfo("Asia/Kolkata")
 MENU_CYCLE_DAYS = 30
+
 
 def get_today_menu_for_chef(
     db: Session,
@@ -42,33 +47,24 @@ def get_today_menu_for_chef(
     target_date: date | None = None,
 ):
     """
-    Production-safe menu resolver.
+    Resolve the menu scheduled for a chef on a specific date.
 
-    Priority:
-    1. Exact date override
-    2. Latest applicable 30-day cycle
-    3. Automatic 30-day repetition
+    Supports:
+    - Date override
+    - 30-day menu cycle
+    - Automatic cycle repetition
+    - Breakfast / Lunch / Dinner
+    - Multiple MenuCycle rows for the same day
 
-    Cycle:
-        Day 1  -> cycle_day 1
-        Day 2  -> cycle_day 2
-        ...
-        Day 30 -> cycle_day 30
-        Day 31 -> Day 1
-        Day 32 -> Day 2
-        ...
+    IMPORTANT:
+    A single cycle_day has 3 records:
+        breakfast
+        lunch
+        dinner
 
-    Important:
-    Multiple cycles are supported.
-
-    The selected menu is always resolved using:
-
-        chef_id
-        + cycle_start_date
-        + cycle_day
-
-    Past orders are not affected because OrderItem stores
-    item_name, price and image as snapshots.
+    Therefore we MUST NOT use .first() directly.
+    We check all records for that cycle day and then
+    match requested_menu_id.
     """
 
     # =====================================================
@@ -128,48 +124,55 @@ def get_today_menu_for_chef(
     ) + 1
 
     # =====================================================
-    # 4️⃣ FIND MENU FROM EXACT CYCLE
+    # 4️⃣ GET ALL MENUS FOR THIS CYCLE DAY
     #
     # IMPORTANT:
-    # cycle_start_date MUST be included.
+    # One day contains:
+    #   breakfast
+    #   lunch
+    #   dinner
     #
-    # This prevents:
-    #
-    # Cycle 1 Day 1
-    # Cycle 2 Day 1
-    #
-    # from being confused.
+    # DO NOT use .first()
     # =====================================================
 
-    cycle_menu = (
+    cycle_menus = (
         db.query(MenuCycle)
         .filter(
             MenuCycle.chef_id == chef_id,
             MenuCycle.cycle_start_date == cycle_start_date,
             MenuCycle.cycle_day == cycle_day,
         )
-        .first()
+        .all()
     )
 
-    if not cycle_menu:
+    if not cycle_menus:
         return None
 
     # =====================================================
-    # 5️⃣ OPTIONAL REQUESTED MENU VALIDATION
+    # 5️⃣ REQUESTED MENU VALIDATION
     #
-    # If caller provided requested_menu_id, return only
-    # the scheduled menu if it matches.
+    # If customer is ordering a specific menu,
+    # check whether THAT menu is scheduled today.
     # =====================================================
 
     if requested_menu_id is not None:
 
-        if cycle_menu.menu_id != requested_menu_id:
-            return None
+        for cycle_menu in cycle_menus:
 
-    return cycle_menu.menu_id
+            if cycle_menu.menu_id == requested_menu_id:
+                return cycle_menu.menu_id
 
+        # Requested menu exists for chef,
+        # but is not today's scheduled menu.
+        return None
 
+    # =====================================================
+    # 6️⃣ NO SPECIFIC MENU REQUESTED
+    #
+    # Return first scheduled menu.
+    # =====================================================
 
+    return cycle_menus[0].menu_id
 # =========================================================
 # 🎁 REFERRAL REWARD — SINGLE TIFFIN
 # =========================================================
