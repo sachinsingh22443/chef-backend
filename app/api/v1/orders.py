@@ -1189,6 +1189,8 @@ async def create_order(
             # =================================================
             # ❗ MUST HAVE EXACTLY ONE ID
             # =================================================
+            meal_type = None
+            target_date = None
 
             if not item.menu_id and not item.special_id:
 
