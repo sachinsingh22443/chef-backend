@@ -1134,17 +1134,86 @@ def create_subscription(
                 )
 
         # =====================================================
-        # 16. ACTIVE SUBSCRIPTION CHECK
+        # 16. 🔐 ACTIVE SUBSCRIPTION CHECK
+        # =====================================================
+        #
+        # Real active subscription:
+        #
+        # start_date <= today <= end_date
+        #
+        # Agar purani subscription ki end_date
+        # nikal chuki hai to uska status automatically
+        # "expired" kar diya jayega.
+        #
         # =====================================================
 
-        existing = (
+        today = datetime.now(IST).date()
+
+        existing_subscriptions = (
             db.query(Subscription)
             .filter(
                 Subscription.user_id == user.id,
                 Subscription.status == "active",
             )
-            .first()
+            .with_for_update()
+            .all()
         )
+
+        existing = None
+
+        for old_subscription in existing_subscriptions:
+
+            # =================================================
+            # NORMALIZE OLD START DATE
+            # =================================================
+
+            old_start_date = (
+                old_subscription.start_date.date()
+                if isinstance(
+                    old_subscription.start_date,
+                    datetime,
+                )
+                else old_subscription.start_date
+            )
+
+            # =================================================
+            # NORMALIZE OLD END DATE
+            # =================================================
+
+            old_end_date = (
+                old_subscription.end_date.date()
+                if isinstance(
+                    old_subscription.end_date,
+                    datetime,
+                )
+                else old_subscription.end_date
+            )
+
+            # =================================================
+            # REAL ACTIVE SUBSCRIPTION
+            # =================================================
+
+            if (
+                old_start_date
+                and old_end_date
+                and old_start_date <= today <= old_end_date
+            ):
+                existing = old_subscription
+                break
+
+            # =================================================
+            # EXPIRED SUBSCRIPTION
+            # =================================================
+
+            if (
+                old_end_date
+                and old_end_date < today
+            ):
+                old_subscription.status = "expired"
+
+        # =====================================================
+        # BLOCK ONLY REAL ACTIVE SUBSCRIPTION
+        # =====================================================
 
         if existing:
             raise HTTPException(
@@ -1240,7 +1309,6 @@ def create_subscription(
             # Plan
             plan_id=plan.id,
 
-            # 🔥 IMPORTANT:
             # Actual paid subscription order
             order_id=order.id,
 
