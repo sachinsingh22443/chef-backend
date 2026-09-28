@@ -5,18 +5,22 @@ from sqlalchemy import (
     String,
     ForeignKey,
     Index,
+    Float,
 )
+
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.db.base import Base
 
 
 class Address(Base):
+
     __tablename__ = "addresses"
 
     __table_args__ = (
         Index("idx_address_user_type", "user_id", "address_type"),
         Index("idx_address_city_state", "city", "state"),
+        Index("idx_address_location", "latitude", "longitude"),
     )
 
     id = Column(
@@ -69,3 +73,14 @@ class Address(Base):
 
     # Full Address
     address = Column(String)
+
+    # 📍 Delivery Location
+    latitude = Column(
+        Float,
+        nullable=True,
+    )
+
+    longitude = Column(
+        Float,
+        nullable=True,
+    )

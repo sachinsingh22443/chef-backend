@@ -1,5 +1,7 @@
 # schemas/address.py
+
 from pydantic import BaseModel
+
 
 class AddressCreate(BaseModel):
     name: str
@@ -14,3 +16,7 @@ class AddressCreate(BaseModel):
     pincode: str
 
     addressType: str
+
+    # 📍 Delivery Location
+    latitude: float | None = None
+    longitude: float | None = None
