@@ -4,7 +4,7 @@ from app.models.menu_cycle import MenuCycle
 from app.models.menu_date_override import MenuDateOverride
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from app.core.cache import get_cache, set_cache
 import os
 from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
@@ -17,6 +17,8 @@ from app.models.menu import Menu
 from app.models.cart import Cart, CartItem
 from app.models.notification import Notification
 from app.models.earning import Earning
+from app.models.address import Address
+from app.models.delivery_order import DeliveryOrder
 from app.schemas.order import OrderCreate
 from app.core.razorpay_client import client
 from pydantic import BaseModel
@@ -180,6 +182,170 @@ def get_today_menu_for_chef(
 # =========================================================
 # 🎁 REFERRAL REWARD — SINGLE TIFFIN
 # =========================================================
+
+# =========================================================
+# 🚚 DELIVERY ORDER CREATOR
+# =========================================================
+
+def create_delivery_order_for_order(
+    db: Session,
+    order: Order,
+    address: Address,
+):
+    """
+    Create delivery_orders entry from normal Order.
+
+    IMPORTANT:
+    - One Order = One DeliveryOrder
+    - Address is copied as snapshot
+    - Customer location is copied from saved Address
+    - Meal type is detected from OrderItems
+    - This function DOES NOT COMMIT
+    """
+
+    # -----------------------------------------------------
+    # DUPLICATE PROTECTION
+    # -----------------------------------------------------
+
+    existing = (
+        db.query(DeliveryOrder)
+        .filter(
+            DeliveryOrder.order_id == order.id
+        )
+        .first()
+    )
+
+    if existing:
+        return existing
+
+    # -----------------------------------------------------
+    # LOAD ORDER ITEMS
+    # -----------------------------------------------------
+
+    items = (
+        db.query(OrderItem)
+        .filter(
+            OrderItem.order_id == order.id
+        )
+        .all()
+    )
+
+    if not items:
+        raise HTTPException(
+            status_code=400,
+            detail="Order items not found for delivery"
+        )
+
+    # -----------------------------------------------------
+    # TOTAL TIFFINS
+    # -----------------------------------------------------
+
+    total_tiffins = sum(
+        int(item.quantity or 0)
+        for item in items
+    )
+
+    if total_tiffins <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid tiffin quantity"
+        )
+
+    # -----------------------------------------------------
+    # MEAL TYPE
+    # -----------------------------------------------------
+
+    meal_types = {
+        str(item.meal_type).lower().strip()
+        for item in items
+        if item.meal_type
+    }
+
+    has_special = any(
+        item.special_id is not None
+        for item in items
+    )
+
+    if has_special and not meal_types:
+        meal_type = "special"
+
+    elif len(meal_types) == 1:
+        meal_type = next(iter(meal_types))
+
+    elif len(meal_types) > 1:
+        meal_type = "mixed"
+
+    else:
+        meal_type = "special"
+
+    # -----------------------------------------------------
+    # ADDRESS SNAPSHOT
+    # -----------------------------------------------------
+
+    address_snapshot = (
+        address.address
+        or f"{address.flat_no or ''}, "
+           f"{address.area or ''}, "
+           f"{address.city or ''} - "
+           f"{address.pincode or ''}"
+    ).strip()
+    
+    
+    if address.latitude is None or address.longitude is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Delivery location is missing for this address. "
+                "Please update the address with location."
+            )
+        )
+
+    # -----------------------------------------------------
+    # CREATE DELIVERY ORDER
+    # -----------------------------------------------------
+
+    delivery_order = DeliveryOrder(
+        order_id=order.id,
+
+        customer_id=order.user_id,
+
+        customer_name=(
+            order.customer_name
+            or address.name
+            or ""
+        ),
+
+        customer_phone=(
+            order.phone
+            or address.phone
+            or ""
+        ),
+
+        address_snapshot=address_snapshot,
+
+        latitude=address.latitude,
+        longitude=address.longitude,
+
+        meal_type=meal_type,
+
+        total_tiffins=total_tiffins,
+
+        delivery_partner_id=None,
+
+        batch_id=None,
+
+        delivery_status="waiting",
+
+        sequence_no=None,
+
+        assigned_at=None,
+        picked_up_at=None,
+        delivered_at=None,
+    )
+
+    db.add(delivery_order)
+
+    return delivery_order
 
 def process_single_tiffin_referral_reward(
     db: Session,
@@ -1090,7 +1256,44 @@ async def create_order(
         total_price = 0
         chef_id = None
         created_items = []
+        
+        # =====================================================
+        # 📍 CUSTOMER ADDRESS VALIDATION
+        # =====================================================
 
+        address = (
+            db.query(Address)
+            .filter(
+                Address.id == data.address_id,
+                Address.user_id == user.id,
+            )
+            .first()
+        )
+
+        if not address:
+            raise HTTPException(
+                status_code=404,
+                detail="Selected address not found"
+            )
+                
+        # -----------------------------------------------------
+        # BUILD ADDRESS SNAPSHOT
+        # -----------------------------------------------------
+        
+        address_snapshot = (
+            address.address
+            or f"{address.flat_no or ''}, "
+               f"{address.area or ''}, "
+               f"{address.city or ''} - "
+               f"{address.pincode or ''}"
+        ).strip()
+        
+        if not address_snapshot:
+            raise HTTPException(
+                status_code=400,
+                detail="Selected address is incomplete"
+            )
+        
         # =====================================================
         # 🚀 FETCH ALL SPECIALS IN ONE QUERY
         # =====================================================
@@ -1154,23 +1357,30 @@ async def create_order(
 
         order = Order(
             user_id=user.id,
-
+        
             status="pending",
-
-            customer_name=user.name,
-
-            phone=user.phone,
-
-            address=data.address,
-
+        
+            customer_name=(
+                address.name
+                or user.name
+            ),
+        
+            phone=(
+                address.phone
+                or user.phone
+            ),
+            
+        
+            address=address_snapshot,
+            
+            address_id=address.id,
+        
             payment_method=data.payment_method,
-
+        
             payment_status="pending",
-
+        
             refund_status="pending",
-
-            # 🔥 IMPORTANT
-            # Subscription flag stored in DB
+        
             is_subscription=bool(
                 data.is_subscription
             ),
@@ -1906,6 +2116,12 @@ async def create_order(
         
             # Mark order as paid
             order.payment_status = "paid"
+            
+            create_delivery_order_for_order(
+                db=db,
+                order=order,
+                address=address,
+            )                 
         
         db.commit()
 
@@ -2123,6 +2339,38 @@ async def confirm_cod_order(
         # =========================
         order.cod_confirmed = True
         order.status = "pending"
+        
+        # =====================================================
+        # 📍 GET CUSTOMER ADDRESS
+        # =====================================================
+
+        address = (
+            db.query(Address)
+            .filter(
+                Address.id == order.address_id,
+                Address.user_id == order.user_id,
+            )
+            .first()
+        )
+        
+        if not address:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Delivery address not found. "
+                    "Please update your saved address."
+                )
+            )
+        
+        # =====================================================
+        # 🚚 CREATE DELIVERY ORDER
+        # =====================================================
+        
+        create_delivery_order_for_order(
+            db=db,
+            order=order,
+            address=address,
+        )
 
         # =========================
         # CUSTOMER NOTIFICATION
@@ -2676,6 +2924,38 @@ async def verify_payment(
         )
 
         order.status = "pending"
+        
+        # =====================================================
+        # 📍 GET ORDER ADDRESS
+        # =====================================================
+        
+        address = (
+            db.query(Address)
+            .filter(
+                Address.id == order.address_id,
+                Address.user_id == order.user_id,
+            )
+            .first()
+        )
+        
+        if not address:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Order address not found. "
+                    "Cannot create delivery order."
+                )
+            )
+        
+        # =====================================================
+        # 🚚 CREATE DELIVERY ORDER
+        # =====================================================
+        
+        create_delivery_order_for_order(
+            db=db,
+            order=order,
+            address=address,
+        )
 
         # =====================================================
         # 🔎 TOMORROW SPECIAL
@@ -2931,41 +3211,16 @@ def update_status(
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-
     # =====================================================
     # UUID VALIDATION
     # =====================================================
 
     try:
-
         order_uuid = UUID(order_id)
-
     except Exception:
-
         raise HTTPException(
             status_code=400,
             detail="Invalid order ID"
-        )
-
-    # =====================================================
-    # 🔐 FETCH ORDER
-    # ONLY ASSIGNED CHEF
-    # =====================================================
-
-    order = (
-        db.query(Order)
-        .filter(
-            Order.id == order_uuid,
-            Order.chef_id == user.id
-        )
-        .first()
-    )
-
-    if not order:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Order not found"
         )
 
     # =====================================================
@@ -2983,10 +3238,25 @@ def update_status(
     ]
 
     if status not in valid_status:
-
         raise HTTPException(
             status_code=400,
             detail="Invalid status"
+        )
+
+    # =====================================================
+    # 🔐 FETCH ORDER
+    # =====================================================
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_uuid)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
         )
 
     # =====================================================
@@ -2996,7 +3266,6 @@ def update_status(
     old_status = order.status
 
     if old_status == status:
-
         return {
             "msg": "already updated",
             "status": status,
@@ -3005,56 +3274,181 @@ def update_status(
         }
 
     # =====================================================
-    # ALLOWED TRANSITIONS
+    # 👨‍🍳 CHEF STATUS CONTROL
     # =====================================================
 
-    allowed_transitions = {
+    if user.role == "chef":
 
-        "pending": [
-            "accepted",
-            "cancelled",
-        ],
+        # -------------------------------------------------
+        # ONLY ORDER'S ASSIGNED CHEF
+        # -------------------------------------------------
 
-        "accepted": [
-            "preparing",
-            "cancelled",
-        ],
+        if order.chef_id != user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not the chef assigned to this order"
+            )
 
-        "preparing": [
-            "ready",
-        ],
+        # -------------------------------------------------
+        # CHEF ALLOWED TRANSITIONS
+        # -------------------------------------------------
 
-        "ready": [
-            "out_for_delivery",
-        ],
+        chef_transitions = {
+            "pending": [
+                "accepted",
+                "cancelled",
+            ],
+            "accepted": [
+                "preparing",
+                "cancelled",
+            ],
+            "preparing": [
+                "ready",
+            ],
+            "ready": [],
+            "out_for_delivery": [],
+            "delivered": [],
+            "cancelled": [],
+        }
 
-        "out_for_delivery": [
-            "delivered",
-        ],
+        if status not in chef_transitions.get(
+            old_status,
+            []
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Chef cannot change status "
+                    f"from {old_status} to {status}"
+                )
+            )
 
-        "delivered": [],
+    # =====================================================
+    # 🚚 DELIVERY PARTNER STATUS CONTROL
+    # =====================================================
 
-        "cancelled": [],
-    }
+    elif user.role == "delivery_partner":
 
-    if status not in allowed_transitions.get(
-        old_status,
-        []
-    ):
+        # -------------------------------------------------
+        # DELIVERY PARTNER MUST BE ACTIVE
+        # -------------------------------------------------
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=403,
+                detail="Delivery partner account is inactive"
+            )
+
+        # -------------------------------------------------
+        # GET DELIVERY ORDER
+        # -------------------------------------------------
+
+        delivery_order = (
+            db.query(DeliveryOrder)
+            .filter(
+                DeliveryOrder.order_id == order.id
+            )
+            .first()
+        )
+
+        if not delivery_order:
+            raise HTTPException(
+                status_code=404,
+                detail="Delivery order not found"
+            )
+
+        # -------------------------------------------------
+        # MUST BE ASSIGNED TO THIS PARTNER
+        # -------------------------------------------------
+
+        if delivery_order.delivery_partner_id != user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="This order is not assigned to you"
+            )
+
+        # -------------------------------------------------
+        # DELIVERY PARTNER TRANSITIONS
+        # -------------------------------------------------
+
+        delivery_transitions = {
+            "pending": [],
+            "accepted": [],
+            "preparing": [],
+            "ready": [
+                "out_for_delivery",
+            ],
+            "out_for_delivery": [
+                "delivered",
+            ],
+            "delivered": [],
+            "cancelled": [],
+        }
+
+        if status not in delivery_transitions.get(
+            old_status,
+            []
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Delivery partner cannot change "
+                    f"status from {old_status} to {status}"
+                )
+            )
+
+    # =====================================================
+    # ❌ OTHER ROLES
+    # =====================================================
+
+    else:
 
         raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Cannot change status "
-                f"from {old_status} to {status}"
-            )
+            status_code=403,
+            detail="You are not allowed to update order status"
         )
 
     # =====================================================
-    # 🔥 UPDATE STATUS
+    # 🔥 UPDATE ORDER STATUS
     # =====================================================
 
     order.status = status
+
+    # =====================================================
+    # 🚚 DELIVERY ORDER STATUS SYNC
+    # =====================================================
+
+    delivery_order = None
+
+    if user.role == "delivery_partner":
+
+        delivery_order = (
+            db.query(DeliveryOrder)
+            .filter(
+                DeliveryOrder.order_id == order.id
+            )
+            .first()
+        )
+
+        if status == "out_for_delivery":
+
+            delivery_order.delivery_status = (
+                "out_for_delivery"
+            )
+
+            delivery_order.picked_up_at = (
+                datetime.utcnow()
+            )
+
+        elif status == "delivered":
+
+            delivery_order.delivery_status = (
+                "delivered"
+            )
+
+            delivery_order.delivered_at = (
+                datetime.utcnow()
+            )
 
     # =====================================================
     # 🔔 NOTIFICATIONS
@@ -3161,20 +3555,6 @@ def update_status(
         # =================================================
         # 🔄 REVERSE REFERRAL REWARD
         # =================================================
-        #
-        # If ₹1 referral reward was already given
-        # for this order, remove it.
-        #
-        # This happens before commit so:
-        #
-        # Order cancellation
-        # +
-        # Wallet reversal
-        # +
-        # Referral reset
-        #
-        # are atomic.
-        # =================================================
 
         try:
 
@@ -3235,6 +3615,28 @@ def update_status(
                     - item.quantity
                 )
 
+        # =================================================
+        # 🚚 CANCEL DELIVERY ORDER
+        # =================================================
+
+        delivery_order = (
+            db.query(DeliveryOrder)
+            .filter(
+                DeliveryOrder.order_id == order.id
+            )
+            .first()
+        )
+
+        if delivery_order:
+
+            delivery_order.delivery_status = (
+                "cancelled"
+            )
+
+            delivery_order.delivery_partner_id = None
+            delivery_order.batch_id = None
+            delivery_order.sequence_no = None
+
     # =====================================================
     # 💰 DELIVERED → CHEF EARNING
     # =====================================================
@@ -3250,18 +3652,6 @@ def update_status(
                 amount=order.total_price
             )
         )
-
-    # =====================================================
-    # ❌ IMPORTANT
-    #
-    # NO REFERRAL REWARD HERE
-    #
-    # Referral reward is already handled inside
-    # verify_payment().
-    #
-    # Therefore delivered status will NEVER
-    # create another ₹1 reward.
-    # =====================================================
 
     # =====================================================
     # 💾 ONE ATOMIC COMMIT
@@ -3287,11 +3677,8 @@ def update_status(
 
     return {
         "msg": "updated",
-
         "status": status,
-
         "referral_reward_given": False,
-
         "referral_reward_reversed": (
             referral_reward_reversed
         ),

@@ -41,15 +41,16 @@ class OrderItemCreate(BaseModel):
 
 
 class OrderCreate(BaseModel):
-
     items: List[OrderItemCreate]
 
-    address: str
+    # Customer selected saved address
+    address_id: UUID
+
+    # Existing address text — backward compatibility ke liye rakhenge
+    address: Optional[str] = None
 
     payment_method: str
-
     amount: Optional[float] = None
-
     is_subscription: bool = False
 
 

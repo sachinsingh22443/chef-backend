@@ -99,3 +99,33 @@ class ResetPasswordSchema(BaseModel):
     token: str
 
     new_password: str = Field(min_length=6)
+    
+    
+
+
+class DeliveryPartnerSignupSchema(BaseModel):
+    name: str = Field(..., min_length=2)
+    email: str
+    phone: str
+    password: str = Field(..., min_length=6)
+
+    date_of_birth: str | None = None
+
+    address: str
+    city: str
+    state: str
+    pincode: str
+
+    vehicle_type: str
+    vehicle_number: str
+
+    driving_license_number: str
+    driving_license_image: str | None = None
+
+    id_proof_type: str
+    id_proof_number: str
+    id_proof_image: str | None = None
+
+    account_holder_name: str
+    account_number: str
+    ifsc_code: str

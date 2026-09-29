@@ -11,6 +11,7 @@ from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
 
 from app.models.user import User
+from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.subscription import Subscription
@@ -4296,3 +4297,352 @@ def admin_tomorrow_special_orders(
 
         "orders": orders,
     }
+    
+    
+# =========================================================
+# 🚚 DELIVERY PARTNERS - PENDING APPLICATIONS
+# =========================================================
+
+@router.get("/delivery-partners")
+def get_delivery_partners(
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        require_role(["admin"])
+    ),
+
+    status: str = Query(
+        "pending",
+        description="pending, approved, rejected"
+    ),
+):
+
+    status = status.strip().lower()
+
+    allowed_statuses = {
+        "pending",
+        "approved",
+        "rejected"
+    }
+
+    if status not in allowed_statuses:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid status. Allowed: "
+                "pending, approved, rejected"
+            )
+        )
+
+    rows = (
+        db.query(
+            User,
+            DeliveryPartnerProfile
+        )
+        .join(
+            DeliveryPartnerProfile,
+            DeliveryPartnerProfile.user_id == User.id
+        )
+        .filter(
+            User.role == "delivery_partner",
+            User.application_status == status
+        )
+        .order_by(
+            DeliveryPartnerProfile.created_at.desc()
+        )
+        .all()
+    )
+
+    result = []
+
+    for user, profile in rows:
+
+        result.append({
+
+            "user_id": str(user.id),
+
+            "profile_id": str(profile.id),
+
+            "name": user.name,
+
+            "email": user.email,
+
+            "phone": user.phone,
+
+            "application_status": (
+                user.application_status
+            ),
+
+            "is_active": user.is_active,
+
+            "date_of_birth": (
+                profile.date_of_birth
+            ),
+
+            "address": profile.address,
+
+            "city": profile.city,
+
+            "state": profile.state,
+
+            "pincode": profile.pincode,
+
+            "profile_image": (
+                profile.profile_image
+            ),
+
+            "vehicle_type": (
+                profile.vehicle_type
+            ),
+
+            "vehicle_number": (
+                profile.vehicle_number
+            ),
+
+            "driving_license_number": (
+                profile.driving_license_number
+            ),
+
+            "driving_license_image": (
+                profile.driving_license_image
+            ),
+
+            "id_proof_type": (
+                profile.id_proof_type
+            ),
+
+            "id_proof_number": (
+                profile.id_proof_number
+            ),
+
+            "id_proof_image": (
+                profile.id_proof_image
+            ),
+
+            "account_holder_name": (
+                profile.account_holder_name
+            ),
+
+            "account_number": (
+                profile.account_number
+            ),
+
+            "ifsc_code": (
+                profile.ifsc_code
+            ),
+
+            "rejection_reason": (
+                profile.rejection_reason
+            ),
+
+            "created_at": (
+                profile.created_at.isoformat()
+                if profile.created_at
+                else None
+            ),
+        })
+
+    return {
+        "count": len(result),
+        "delivery_partners": result
+    }
+    
+# =========================================================
+# 🚚 APPROVE DELIVERY PARTNER
+# =========================================================
+
+@router.put("/delivery-partners/{user_id}/approve")
+def approve_delivery_partner(
+    user_id: UUIDType,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        require_role(["admin"])
+    ),
+):
+
+    user = (
+        db.query(User)
+        .filter(
+            User.id == user_id,
+            User.role == "delivery_partner"
+        )
+        .first()
+    )
+
+    if not user:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery partner not found"
+        )
+
+    profile = (
+        db.query(DeliveryPartnerProfile)
+        .filter(
+            DeliveryPartnerProfile.user_id == user.id
+        )
+        .first()
+    )
+
+    if not profile:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery partner profile not found"
+        )
+
+    # =====================================================
+    # APPROVE
+    # =====================================================
+
+    user.application_status = "approved"
+
+    user.is_active = True
+
+    user.rejection_reason = None
+
+    profile.application_status = "approved"
+
+    profile.rejection_reason = None
+
+    profile.is_online = False
+
+    profile.is_available = False
+
+    profile.updated_at = datetime.utcnow()
+
+    db.commit()
+
+    db.refresh(user)
+    db.refresh(profile)
+
+    return {
+
+        "message": (
+            "Delivery partner approved successfully"
+        ),
+
+        "user_id": str(user.id),
+
+        "profile_id": str(profile.id),
+
+        "application_status": (
+            user.application_status
+        ),
+
+        "is_active": user.is_active,
+
+        "is_online": profile.is_online,
+
+        "is_available": profile.is_available
+    }
+    
+# =========================================================
+# 🚚 REJECT DELIVERY PARTNER
+# =========================================================
+
+class DeliveryPartnerRejectSchema(BaseModel):
+
+    rejection_reason: str = Field(
+        ...,
+        min_length=3
+    )
+
+
+@router.put("/delivery-partners/{user_id}/reject")
+def reject_delivery_partner(
+    user_id: UUIDType,
+
+    data: DeliveryPartnerRejectSchema,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        require_role(["admin"])
+    ),
+):
+
+    user = (
+        db.query(User)
+        .filter(
+            User.id == user_id,
+            User.role == "delivery_partner"
+        )
+        .first()
+    )
+
+    if not user:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery partner not found"
+        )
+
+    profile = (
+        db.query(DeliveryPartnerProfile)
+        .filter(
+            DeliveryPartnerProfile.user_id == user.id
+        )
+        .first()
+    )
+
+    if not profile:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery partner profile not found"
+        )
+
+    reason = data.rejection_reason.strip()
+
+    if not reason:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Rejection reason is required"
+        )
+
+    # =====================================================
+    # REJECT
+    # =====================================================
+
+    user.application_status = "rejected"
+
+    user.is_active = False
+
+    user.rejection_reason = reason
+
+    profile.application_status = "rejected"
+
+    profile.rejection_reason = reason
+
+    profile.is_online = False
+
+    profile.is_available = False
+
+    profile.updated_at = datetime.utcnow()
+
+    db.commit()
+
+    return {
+
+        "message": (
+            "Delivery partner application rejected"
+        ),
+
+        "user_id": str(user.id),
+
+        "profile_id": str(profile.id),
+
+        "application_status": (
+            user.application_status
+        ),
+
+        "is_active": user.is_active,
+
+        "rejection_reason": reason
+    }
+    

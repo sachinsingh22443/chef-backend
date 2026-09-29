@@ -83,6 +83,13 @@ class Order(Base):
         default="pending",
         index=True
     )
+    
+    address_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("addresses.id"),
+        nullable=True,
+        index=True,
+    )
 
     refund_amount = Column(Float, nullable=True)
 

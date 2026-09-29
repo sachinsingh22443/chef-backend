@@ -15,8 +15,10 @@ from app.api.v1.admin_chefs import router as admin_chefs_router
 from app.api.v1.tomorrow_special_preorder import (
     router as tomorrow_special_preorder_router,
 )
+from app.api.v1 import delivery
 # Models
 from app.models.refresh_token import RefreshToken
+from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models import (
     user,
     menu,
@@ -24,6 +26,8 @@ from app.models import (
     order_item,
     subscription_plan,
     subscription_plan_menu_cycle,
+    delivery_order,
+    delivery_batch,
 )
 
 from app.api.v1 import (
@@ -123,6 +127,7 @@ app.include_router(admin_chefs_router)
 app.include_router(
     tomorrow_special_preorder_router
 )
+app.include_router(delivery.router)
 # ==========================
 # Health Check
 # ==========================
