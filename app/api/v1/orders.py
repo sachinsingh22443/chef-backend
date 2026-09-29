@@ -1747,9 +1747,8 @@ async def create_order(
                             else None
                         ),
 
-                        meal_type=meal_type,
-
-                        menu_date=target_date,
+                        meal_type="special",
+                        menu_date=special.special_date,
                     )
                 )
 
@@ -1944,6 +1943,7 @@ async def create_order(
                         item_name=special.dish_name,
 
                         item_image=special.image_url,
+                        
                     )
                 )
 

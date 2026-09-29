@@ -11,6 +11,7 @@ from app.models.order_item import OrderItem
 from app.api.deps import get_db, get_current_user
 from app.models.tomorrow_special import TomorrowSpecial
 from app.models.user import User
+from app.models.address import Address
 from app.schemas.tomorrow_special import PreOrderCreate
 
 router = APIRouter(prefix="/tomorrow-special", tags=["Tomorrow Special"])
@@ -521,6 +522,36 @@ def create_pre_order(
             status_code=403,
             detail="Only customers can place pre-orders",
         )
+        
+        # =====================================================
+    # 📍 CUSTOMER ADDRESS
+    # =====================================================
+
+    address = (
+        db.query(Address)
+        .filter(
+            Address.id == data.address_id,
+            Address.user_id == user.id,
+        )
+        .first()
+    )
+
+    if not address:
+        raise HTTPException(
+            status_code=404,
+            detail="Selected address not found",
+        )
+
+    # Delivery partner system ke liye
+    # latitude + longitude mandatory hai
+    if address.latitude is None or address.longitude is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Selected address does not have location coordinates. "
+                "Please update the address location and try again."
+            ),
+        )
 
     # =====================================================
     # 🔎 LOCK SPECIAL ROW
@@ -663,6 +694,10 @@ def create_pre_order(
     # Existing payment/COD flow can update this order.
     # =====================================================
 
+        # =====================================================
+    # 🧾 CREATE ORDER
+    # =====================================================
+
     order = Order(
         user_id=user.id,
         chef_id=chef_id,
@@ -676,9 +711,11 @@ def create_pre_order(
         customer_name=user.name,
         phone=user.phone,
 
-        # Existing Tomorrow Special endpoint
-        # does not receive address/payment method.
-        address=None,
+        # 📍 DELIVERY ADDRESS
+        address_id=address.id,
+        address=address.address,
+
+        # 💳 PAYMENT
         payment_method="tomorrow_special",
         payment_status="pending",
 
@@ -715,7 +752,7 @@ def create_pre_order(
 
         item_image=special.image_url,
 
-        meal_type=None,
+        meal_type="special",
 
         menu_date=special.special_date,
     )

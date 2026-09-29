@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from uuid import UUID
 from typing import Optional
+from app.models.address import Address
 
 
 class TomorrowSpecialCreate(BaseModel):
@@ -70,6 +71,10 @@ class TomorrowSpecialResponse(BaseModel):
 
 
 class PreOrderCreate(BaseModel):
+
     special_id: UUID
+
     quantity: int = 1
+
+    address_id: UUID
     
