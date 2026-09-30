@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from uuid import UUID as UUIDType
 from zoneinfo import ZoneInfo
-
+from app.services.delivery_assignment import run_delivery_assignment
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, or_
@@ -4646,3 +4646,34 @@ def reject_delivery_partner(
         "rejection_reason": reason
     }
     
+
+
+# =========================================================
+# 🚚 AUTOMATIC DELIVERY ASSIGNMENT
+# =========================================================
+
+@router.post("/delivery/assign")
+def admin_assign_delivery(
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        require_role(["admin"])
+    ),
+):
+    """
+    Run automatic delivery assignment.
+
+    Rules handled by delivery_assignment service:
+    - READY orders only
+    - Waiting delivery orders only
+    - Online + available delivery partners only
+    - Maximum 30 tiffins per batch
+    - Dynamic location-based assignment
+    - Automatic route sequence
+    """
+
+    result = run_delivery_assignment(
+        db=db
+    )
+
+    return result
