@@ -19,6 +19,7 @@ from app.models.notification import Notification
 from app.models.earning import Earning
 from app.models.address import Address
 from app.models.delivery_order import DeliveryOrder
+from app.services.delivery_assignment import run_delivery_assignment
 from app.schemas.order import OrderCreate
 from app.core.razorpay_client import client
 from pydantic import BaseModel
@@ -3413,6 +3414,20 @@ def update_status(
     # =====================================================
 
     order.status = status
+    # ============================================================
+# 🚚 AUTOMATIC DELIVERY ASSIGNMENT
+# ============================================================
+
+    if status == "ready":
+
+        assignment_result = run_delivery_assignment(
+            db=db
+        )
+
+        print(
+            "🚚 AUTOMATIC DELIVERY ASSIGNMENT RESULT:",
+            assignment_result
+        )
 
     # =====================================================
     # 🚚 DELIVERY ORDER STATUS SYNC

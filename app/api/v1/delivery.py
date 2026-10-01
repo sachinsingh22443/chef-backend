@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_current_user
 from app.models.user import User
 from app.models.delivery_partner import DeliveryPartnerProfile
+from app.services.delivery_assignment import run_delivery_assignment
 from app.models.delivery_order import DeliveryOrder
 from app.models.order import Order
 
@@ -255,7 +256,23 @@ def update_availability(
     profile.updated_at = datetime.utcnow()
 
     db.commit()
+    if profile.is_online and profile.is_available:
 
+        try:
+            assignment_result = run_delivery_assignment(
+                db=db
+            )
+    
+            print(
+                "🚚 AUTO DELIVERY ASSIGNMENT:",
+                assignment_result
+            )
+    
+        except Exception as e:
+            print(
+                "⚠️ AUTO DELIVERY ASSIGNMENT ERROR:",
+                str(e)
+            )
     db.refresh(profile)
 
     return {
@@ -300,6 +317,24 @@ def update_delivery_location(
     profile.updated_at = datetime.utcnow()
 
     db.commit()
+    
+    if profile.is_online and profile.is_available:
+
+        try:
+            assignment_result = run_delivery_assignment(
+                db=db
+            )
+    
+            print(
+                "🚚 AUTO ASSIGN AFTER LOCATION UPDATE:",
+                assignment_result
+            )
+    
+        except Exception as e:
+            print(
+                "⚠️ AUTO ASSIGN LOCATION ERROR:",
+                str(e)
+            )
 
     db.refresh(profile)
 
