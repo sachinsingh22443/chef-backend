@@ -1255,6 +1255,7 @@ def run_delivery_assignment(
     drivers = get_eligible_delivery_partners(db)
 
     if not drivers:
+        db.commit()
         return {
             "success": True,
             "message": (
@@ -1278,6 +1279,7 @@ def run_delivery_assignment(
     )
 
     if not waiting_orders:
+        db.commit()
         return {
             "success": True,
             "message": (
