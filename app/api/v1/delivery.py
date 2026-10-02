@@ -11,6 +11,8 @@ from app.models.delivery_partner import DeliveryPartnerProfile
 from app.services.delivery_assignment import run_delivery_assignment
 from app.models.delivery_order import DeliveryOrder
 from app.models.order import Order
+from app.models.delivery_batch import DeliveryBatch
+from app.models.delivery_batch_pickup import DeliveryBatchPickup
 
 
 router = APIRouter(
@@ -35,6 +37,16 @@ class DeliveryAvailabilitySchema(BaseModel):
 class DeliveryLocationSchema(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
+    
+# =========================================================
+# PICKUP SCHEMAS
+# =========================================================
+
+class DeliveryPickupConfirmSchema(BaseModel):
+    received_tiffins: int = Field(..., ge=0)
+    
+class DeliveryPickupResolveSchema(BaseModel):
+    received_tiffins: int = Field(..., ge=0)
 
 
 # =========================================================
@@ -827,3 +839,944 @@ def get_my_delivery_order_detail(
             ),
         },
     }
+    
+    
+
+# =========================================================
+# 🚚 GET MY BATCH PICKUP STOPS
+# =========================================================
+
+@router.get("/batches/{batch_id}/pickups")
+def get_my_batch_pickups(
+    batch_id: str,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+    # -----------------------------------------------------
+    # DELIVERY PARTNER VALIDATION
+    # -----------------------------------------------------
+
+    profile = get_delivery_partner_profile(
+        current_user,
+        db,
+    )
+
+    # -----------------------------------------------------
+    # VALIDATE BATCH UUID
+    # -----------------------------------------------------
+
+    try:
+        batch_uuid = UUID(batch_id)
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid batch ID",
+        )
+
+    # -----------------------------------------------------
+    # GET BATCH
+    # -----------------------------------------------------
+
+    batch = (
+        db.query(DeliveryBatch)
+        .filter(
+            DeliveryBatch.id == batch_uuid,
+
+            DeliveryBatch.delivery_partner_id
+            == current_user.id,
+        )
+        .first()
+    )
+
+    if not batch:
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery batch not found",
+        )
+
+    # -----------------------------------------------------
+    # GET PICKUPS
+    # -----------------------------------------------------
+
+    pickups = (
+        db.query(DeliveryBatchPickup)
+        .filter(
+            DeliveryBatchPickup.batch_id
+            == batch.id,
+        )
+        .order_by(
+            DeliveryBatchPickup.sequence_no.asc()
+        )
+        .all()
+    )
+
+    # -----------------------------------------------------
+    # RESPONSE
+    # -----------------------------------------------------
+
+    pickup_data = []
+
+    for pickup in pickups:
+
+        pickup_data.append(
+            {
+                "pickup_id": str(
+                    pickup.id
+                ),
+
+                "batch_id": str(
+                    pickup.batch_id
+                ),
+
+                "chef_id": str(
+                    pickup.chef_id
+                ),
+
+                "sequence_no": (
+                    pickup.sequence_no
+                ),
+
+                "chef_name": (
+                    pickup.chef_name
+                ),
+
+                "kitchen_location": (
+                    pickup.kitchen_location
+                ),
+
+                "latitude": (
+                    pickup.latitude
+                ),
+
+                "longitude": (
+                    pickup.longitude
+                ),
+
+                "expected_tiffins": (
+                    pickup.expected_tiffins
+                ),
+
+                "received_tiffins": (
+                    pickup.received_tiffins
+                ),
+
+                "status": (
+                    pickup.status
+                ),
+
+                "arrived_at": (
+                    pickup.arrived_at.isoformat()
+                    if pickup.arrived_at
+                    else None
+                ),
+
+                "picked_up_at": (
+                    pickup.picked_up_at.isoformat()
+                    if pickup.picked_up_at
+                    else None
+                ),
+            }
+        )
+
+    # -----------------------------------------------------
+    # SUMMARY
+    # -----------------------------------------------------
+
+    total_expected = sum(
+        int(
+            pickup.expected_tiffins
+            or 0
+        )
+        for pickup in pickups
+    )
+
+    total_received = sum(
+        int(
+            pickup.received_tiffins
+            or 0
+        )
+        for pickup in pickups
+    )
+
+    completed_pickups = sum(
+        1
+        for pickup in pickups
+        if pickup.status == "picked_up"
+    )
+
+    return {
+        "success": True,
+
+        "batch": {
+            "id": str(batch.id),
+
+            "delivery_date": str(
+                batch.delivery_date
+            ),
+
+            "meal_type": (
+                batch.meal_type
+            ),
+
+            "status": (
+                batch.status
+            ),
+
+            "total_orders": (
+                batch.total_orders
+            ),
+
+            "total_tiffins": (
+                batch.total_tiffins
+            ),
+        },
+
+        "summary": {
+            "total_pickup_stops": len(
+                pickups
+            ),
+
+            "completed_pickups": (
+                completed_pickups
+            ),
+
+            "total_expected_tiffins": (
+                total_expected
+            ),
+
+            "total_received_tiffins": (
+                total_received
+            ),
+        },
+
+        "pickups": pickup_data,
+    }
+    
+# =========================================================
+# 🚚 CONFIRM PICKUP
+# =========================================================
+
+# =========================================================
+# 🚚 MARK PICKUP AS ARRIVED
+# =========================================================
+
+@router.post(
+    "/pickups/{pickup_id}/arrive"
+)
+def arrive_at_pickup(
+    pickup_id: str,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+    # -----------------------------------------------------
+    # DELIVERY PARTNER VALIDATION
+    # -----------------------------------------------------
+
+    profile = get_delivery_partner_profile(
+        current_user,
+        db,
+    )
+
+    # -----------------------------------------------------
+    # VALIDATE UUID
+    # -----------------------------------------------------
+
+    try:
+        pickup_uuid = UUID(pickup_id)
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid pickup ID",
+        )
+
+    # -----------------------------------------------------
+    # GET PICKUP + BATCH
+    # -----------------------------------------------------
+
+    pickup = (
+        db.query(DeliveryBatchPickup)
+        .join(
+            DeliveryBatch,
+            DeliveryBatch.id
+            == DeliveryBatchPickup.batch_id,
+        )
+        .filter(
+            DeliveryBatchPickup.id
+            == pickup_uuid,
+
+            DeliveryBatch.delivery_partner_id
+            == current_user.id,
+        )
+        .first()
+    )
+
+    if not pickup:
+        raise HTTPException(
+            status_code=404,
+            detail="Pickup stop not found",
+        )
+
+    # -----------------------------------------------------
+    # ALREADY PICKED UP
+    # -----------------------------------------------------
+
+    if pickup.status == "picked_up":
+        raise HTTPException(
+            status_code=400,
+            detail="This pickup has already been completed",
+        )
+
+    # -----------------------------------------------------
+    # PICKUP SEQUENCE LOCK
+    # -----------------------------------------------------
+
+    previous_pickup = (
+        db.query(DeliveryBatchPickup)
+        .filter(
+            DeliveryBatchPickup.batch_id
+            == pickup.batch_id,
+
+            DeliveryBatchPickup.sequence_no
+            < pickup.sequence_no,
+        )
+        .order_by(
+            DeliveryBatchPickup.sequence_no.desc()
+        )
+        .first()
+    )
+
+    if previous_pickup:
+
+        if previous_pickup.status != "picked_up":
+
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": (
+                        "You must complete the previous "
+                        "chef pickup first"
+                    ),
+
+                    "current_chef": (
+                        pickup.chef_name
+                    ),
+
+                    "current_sequence": (
+                        pickup.sequence_no
+                    ),
+
+                    "previous_chef": (
+                        previous_pickup.chef_name
+                    ),
+
+                    "previous_sequence": (
+                        previous_pickup.sequence_no
+                    ),
+
+                    "previous_status": (
+                        previous_pickup.status
+                    ),
+                },
+            )
+
+    # -----------------------------------------------------
+    # STATUS CHECK
+    # -----------------------------------------------------
+
+    if pickup.status != "pending":
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Pickup cannot be marked arrived "
+                f"from status '{pickup.status}'"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # MARK ARRIVED
+    # -----------------------------------------------------
+
+    pickup.status = "arrived"
+
+    pickup.arrived_at = datetime.utcnow()
+
+    pickup.updated_at = datetime.utcnow()
+
+    db.add(pickup)
+
+    db.commit()
+
+    db.refresh(pickup)
+
+    # -----------------------------------------------------
+    # RESPONSE
+    # -----------------------------------------------------
+
+    return {
+        "success": True,
+
+        "message": (
+            "Arrived at chef kitchen"
+        ),
+
+        "pickup": {
+            "pickup_id": str(
+                pickup.id
+            ),
+
+            "batch_id": str(
+                pickup.batch_id
+            ),
+
+            "chef_id": str(
+                pickup.chef_id
+            ),
+
+            "chef_name": (
+                pickup.chef_name
+            ),
+
+            "sequence_no": (
+                pickup.sequence_no
+            ),
+
+            "expected_tiffins": (
+                pickup.expected_tiffins
+            ),
+
+            "received_tiffins": (
+                pickup.received_tiffins
+            ),
+
+            "status": (
+                pickup.status
+            ),
+
+            "arrived_at": (
+                pickup.arrived_at.isoformat()
+                if pickup.arrived_at
+                else None
+            ),
+        },
+    }
+
+@router.post(
+    "/pickups/{pickup_id}/confirm"
+)
+def confirm_pickup(
+    pickup_id: str,
+
+    data: DeliveryPickupConfirmSchema,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+    # -----------------------------------------------------
+    # DELIVERY PARTNER VALIDATION
+    # -----------------------------------------------------
+
+    profile = get_delivery_partner_profile(
+        current_user,
+        db,
+    )
+
+    # -----------------------------------------------------
+    # VALIDATE UUID
+    # -----------------------------------------------------
+
+    try:
+        pickup_uuid = UUID(pickup_id)
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid pickup ID",
+        )
+
+    # -----------------------------------------------------
+    # GET PICKUP + BATCH
+    # -----------------------------------------------------
+
+    pickup = (
+        db.query(DeliveryBatchPickup)
+        .join(
+            DeliveryBatch,
+            DeliveryBatch.id
+            == DeliveryBatchPickup.batch_id,
+        )
+        .filter(
+            DeliveryBatchPickup.id
+            == pickup_uuid,
+
+            DeliveryBatch.delivery_partner_id
+            == current_user.id,
+        )
+        .first()
+    )
+
+    if not pickup:
+        raise HTTPException(
+            status_code=404,
+            detail="Pickup stop not found",
+        )
+
+    # -----------------------------------------------------
+    # MUST ARRIVE FIRST
+    # -----------------------------------------------------
+
+    if pickup.status == "pending":
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "You must mark arrived "
+                "before confirming pickup"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # ALREADY COMPLETED
+    # -----------------------------------------------------
+    
+    # -----------------------------------------------------
+# PICKUP SEQUENCE LOCK
+# -----------------------------------------------------
+
+    previous_pickup = (
+        db.query(DeliveryBatchPickup)
+        .filter(
+            DeliveryBatchPickup.batch_id
+            == pickup.batch_id,
+    
+            DeliveryBatchPickup.sequence_no
+            < pickup.sequence_no,
+        )
+        .order_by(
+            DeliveryBatchPickup.sequence_no.desc()
+        )
+        .first()
+    )
+    
+    if previous_pickup:
+    
+        if previous_pickup.status != "picked_up":
+    
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": (
+                        "You must complete the previous "
+                        "chef pickup first"
+                    ),
+    
+                    "current_chef": (
+                        pickup.chef_name
+                    ),
+    
+                    "current_sequence": (
+                        pickup.sequence_no
+                    ),
+    
+                    "previous_chef": (
+                        previous_pickup.chef_name
+                    ),
+    
+                    "previous_sequence": (
+                        previous_pickup.sequence_no
+                    ),
+    
+                    "previous_status": (
+                        previous_pickup.status
+                    ),
+                },
+            )
+
+    if pickup.status == "picked_up":
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This pickup has already "
+                "been completed"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # RECEIVED TIFFINS
+    # -----------------------------------------------------
+
+    received_tiffins = int(
+        data.received_tiffins
+    )
+
+    expected_tiffins = int(
+        pickup.expected_tiffins or 0
+    )
+
+    # -----------------------------------------------------
+    # VALIDATE RECEIVED QUANTITY
+    # -----------------------------------------------------
+
+    if received_tiffins < 0:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Received tiffins cannot "
+                "be negative"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # SAVE RECEIVED QUANTITY
+    # -----------------------------------------------------
+
+    pickup.received_tiffins = (
+        received_tiffins
+    )
+
+    pickup.updated_at = datetime.utcnow()
+
+    # -----------------------------------------------------
+    # EXACT MATCH
+    # -----------------------------------------------------
+
+    if received_tiffins == expected_tiffins:
+
+        pickup.status = "picked_up"
+    
+        pickup.picked_up_at = datetime.utcnow()
+        synced_orders = sync_chef_pickup_to_delivery_orders(
+            db=db,
+            batch_id=pickup.batch_id,
+            chef_id=pickup.chef_id,
+            picked_up_at=pickup.picked_up_at,
+        )
+    
+        message = (
+            "Pickup confirmed successfully"
+        )
+
+    # -----------------------------------------------------
+    # MISMATCH
+    # -----------------------------------------------------
+
+    else:
+
+        pickup.status = "issue"
+
+        pickup.picked_up_at = None
+
+        message = (
+            "Tiffin quantity mismatch. "
+            "Pickup requires verification."
+        )
+
+    db.add(pickup)
+
+    db.commit()
+
+    db.refresh(pickup)
+
+    # -----------------------------------------------------
+    # RESPONSE
+    # -----------------------------------------------------
+
+    return {
+        "success": True,
+
+        "message": message,
+
+        "pickup": {
+            "pickup_id": str(
+                pickup.id
+            ),
+
+            "chef_id": str(
+                pickup.chef_id
+            ),
+
+            "chef_name": (
+                pickup.chef_name
+            ),
+
+            "expected_tiffins": (
+                expected_tiffins
+            ),
+
+            "received_tiffins": (
+                pickup.received_tiffins
+            ),
+
+            "status": (
+                pickup.status
+            ),
+
+            "arrived_at": (
+                pickup.arrived_at.isoformat()
+                if pickup.arrived_at
+                else None
+            ),
+
+            "picked_up_at": (
+                pickup.picked_up_at.isoformat()
+                if pickup.picked_up_at
+                else None
+            ),
+        },
+    }
+    
+
+@router.post(
+    "/pickups/{pickup_id}/resolve"
+)
+def resolve_pickup_issue(
+    pickup_id: str,
+
+    data: DeliveryPickupResolveSchema,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+    profile = get_delivery_partner_profile(
+        current_user,
+        db,
+    )
+
+    # -----------------------------------------------------
+    # VALIDATE UUID
+    # -----------------------------------------------------
+
+    try:
+        pickup_uuid = UUID(pickup_id)
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid pickup ID",
+        )
+
+    # -----------------------------------------------------
+    # GET PICKUP + BATCH
+    # -----------------------------------------------------
+
+    pickup = (
+        db.query(DeliveryBatchPickup)
+        .join(
+            DeliveryBatch,
+            DeliveryBatch.id
+            == DeliveryBatchPickup.batch_id,
+        )
+        .filter(
+            DeliveryBatchPickup.id
+            == pickup_uuid,
+
+            DeliveryBatch.delivery_partner_id
+            == current_user.id,
+        )
+        .first()
+    )
+
+    if not pickup:
+        raise HTTPException(
+            status_code=404,
+            detail="Pickup stop not found",
+        )
+
+    # -----------------------------------------------------
+    # ONLY ISSUE PICKUPS CAN BE RESOLVED
+    # -----------------------------------------------------
+
+    if pickup.status != "issue":
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only pickups with status 'issue' "
+                f"can be resolved. "
+                f"Current status: '{pickup.status}'"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # RECEIVED TIFFINS
+    # -----------------------------------------------------
+
+    received_tiffins = int(
+        data.received_tiffins
+    )
+
+    expected_tiffins = int(
+        pickup.expected_tiffins or 0
+    )
+
+    # -----------------------------------------------------
+    # EXACT QUANTITY REQUIRED
+    # -----------------------------------------------------
+
+    if received_tiffins != expected_tiffins:
+
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "Pickup issue cannot be resolved "
+                    "until received quantity matches "
+                    "expected quantity"
+                ),
+
+                "expected_tiffins": (
+                    expected_tiffins
+                ),
+
+                "received_tiffins": (
+                    received_tiffins
+                ),
+            },
+        )
+
+    # -----------------------------------------------------
+    # RESOLVE
+    # -----------------------------------------------------
+
+    pickup.received_tiffins = (
+        received_tiffins
+    )
+
+    pickup.status = "picked_up"
+
+    pickup.picked_up_at = datetime.utcnow()
+    
+    pickup.updated_at = datetime.utcnow()
+    
+    # -----------------------------------------------------
+    # SYNC DELIVERY ORDERS
+    # -----------------------------------------------------
+    
+    synced_orders = sync_chef_pickup_to_delivery_orders(
+        db=db,
+        batch_id=pickup.batch_id,
+        chef_id=pickup.chef_id,
+        picked_up_at=pickup.picked_up_at,
+    )
+
+    db.add(pickup)
+
+    db.commit()
+
+    db.refresh(pickup)
+
+    # -----------------------------------------------------
+    # RESPONSE
+    # -----------------------------------------------------
+
+    return {
+        "success": True,
+
+        "message": (
+            "Pickup issue resolved "
+            "and pickup confirmed"
+        ),
+
+        "pickup": {
+            "pickup_id": str(
+                pickup.id
+            ),
+
+            "batch_id": str(
+                pickup.batch_id
+            ),
+
+            "chef_id": str(
+                pickup.chef_id
+            ),
+
+            "chef_name": (
+                pickup.chef_name
+            ),
+
+            "sequence_no": (
+                pickup.sequence_no
+            ),
+
+            "expected_tiffins": (
+                expected_tiffins
+            ),
+
+            "received_tiffins": (
+                pickup.received_tiffins
+            ),
+
+            "status": (
+                pickup.status
+            ),
+
+            "arrived_at": (
+                pickup.arrived_at.isoformat()
+                if pickup.arrived_at
+                else None
+            ),
+
+            "picked_up_at": (
+                pickup.picked_up_at.isoformat()
+                if pickup.picked_up_at
+                else None
+            ),
+        },
+    }
+    
+# =========================================================
+# 🚚 SYNC CHEF PICKUP TO DELIVERY ORDERS
+# =========================================================
+
+def sync_chef_pickup_to_delivery_orders(
+    db: Session,
+    batch_id: UUID,
+    chef_id: UUID,
+    picked_up_at: datetime,
+):
+    delivery_orders = (
+        db.query(DeliveryOrder)
+        .join(
+            Order,
+            Order.id == DeliveryOrder.order_id,
+        )
+        .filter(
+            DeliveryOrder.batch_id == batch_id,
+            Order.chef_id == chef_id,
+            DeliveryOrder.delivery_status.in_(
+                [
+                    "assigned",
+                    "ready",
+                    "out_for_delivery",
+                ]
+            ),
+        )
+        .all()
+    )
+
+    synced_count = 0
+
+    for delivery_order in delivery_orders:
+        delivery_order.picked_up_at = picked_up_at
+        db.add(delivery_order)
+        synced_count += 1
+
+    return synced_count

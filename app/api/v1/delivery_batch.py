@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_current_user
 
 from app.models.user import User
+
 from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models.delivery_batch import DeliveryBatch
 from app.models.delivery_order import DeliveryOrder
 from app.models.order import Order
+from app.models.delivery_batch_pickup import DeliveryBatchPickup
 
 
 router = APIRouter(
@@ -434,6 +436,10 @@ def get_batch_detail(
 # START BATCH / START DELIVERY
 # ============================================================
 
+# ============================================================
+# START BATCH / START DELIVERY
+# ============================================================
+
 @router.post("/{batch_id}/start")
 def start_batch(
     batch_id: str,
@@ -504,9 +510,122 @@ def start_batch(
             ),
         )
 
+    # ========================================================
+    # PICKUP CHECK
+    # ========================================================
+
+    pickups = (
+        db.query(DeliveryBatchPickup)
+        .filter(
+            DeliveryBatchPickup.batch_id
+            == batch.id,
+        )
+        .order_by(
+            DeliveryBatchPickup.sequence_no.asc()
+        )
+        .all()
+    )
+
     # --------------------------------------------------------
-    # GET FIRST ORDER
+    # NO PICKUP STOPS
     # --------------------------------------------------------
+
+    if not pickups:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Pickup stops are not created "
+                "for this batch"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # CHECK PICKUP ISSUES
+    # --------------------------------------------------------
+
+    issue_pickups = [
+        pickup
+        for pickup in pickups
+        if pickup.status == "issue"
+    ]
+
+    if issue_pickups:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot start delivery because "
+                "one or more chef pickups have "
+                "quantity issues"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # CHECK PENDING / ARRIVED PICKUPS
+    # --------------------------------------------------------
+
+    incomplete_pickups = [
+        pickup
+        for pickup in pickups
+        if pickup.status != "picked_up"
+    ]
+
+    if incomplete_pickups:
+
+        pending_names = [
+            pickup.chef_name
+            for pickup in incomplete_pickups
+        ]
+
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "All chef pickups must be "
+                    "completed before starting delivery"
+                ),
+                "pending_pickups": pending_names,
+            },
+        )
+
+    # ========================================================
+    # VERIFY PICKUP TIFFIN TOTAL
+    # ========================================================
+
+    expected_total = sum(
+        int(
+            pickup.expected_tiffins
+            or 0
+        )
+        for pickup in pickups
+    )
+
+    received_total = sum(
+        int(
+            pickup.received_tiffins
+            or 0
+        )
+        for pickup in pickups
+    )
+
+    if expected_total != received_total:
+
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (
+                    "Received tiffin quantity does "
+                    "not match expected quantity"
+                ),
+                "expected_tiffins": expected_total,
+                "received_tiffins": received_total,
+            },
+        )
+
+    # ========================================================
+    # GET FIRST DELIVERY ORDER
+    # ========================================================
 
     first_order = (
         db.query(
@@ -515,11 +634,13 @@ def start_batch(
         )
         .join(
             Order,
-            Order.id == DeliveryOrder.order_id,
+            Order.id
+            == DeliveryOrder.order_id,
         )
         .filter(
             DeliveryOrder.batch_id
             == batch.id,
+
             DeliveryOrder.delivery_status
             == "assigned",
         )
@@ -533,14 +654,17 @@ def start_batch(
 
         raise HTTPException(
             status_code=400,
-            detail="No assigned orders available in this batch",
+            detail=(
+                "No assigned orders available "
+                "in this batch"
+            ),
         )
 
     delivery_order, order = first_order
 
-    # --------------------------------------------------------
-    # START BATCH
-    # --------------------------------------------------------
+    # ========================================================
+    # START DELIVERY
+    # ========================================================
 
     now = datetime.utcnow()
 
@@ -549,19 +673,24 @@ def start_batch(
     batch.started_at = now
 
     # --------------------------------------------------------
-    # FIRST ORDER → OUT FOR DELIVERY
+    # FIRST CUSTOMER ORDER
     # --------------------------------------------------------
 
     delivery_order.delivery_status = (
         "out_for_delivery"
     )
 
-    delivery_order.picked_up_at = now
+    delivery_order.picked_up_at = (
+        delivery_order.picked_up_at
+        or now
+    )
 
-    # Main order status
     order.status = "out_for_delivery"
 
-    # Driver remains busy
+    # --------------------------------------------------------
+    # DRIVER BUSY
+    # --------------------------------------------------------
+
     profile.is_available = False
 
     db.add(batch)
@@ -573,27 +702,54 @@ def start_batch(
 
     db.refresh(batch)
     db.refresh(delivery_order)
+    db.refresh(profile)
 
-    # --------------------------------------------------------
+    # ========================================================
     # RESPONSE
-    # --------------------------------------------------------
+    # ========================================================
 
     return {
         "success": True,
 
         "message": (
-            "Delivery batch started"
+            "All chef pickups completed. "
+            "Delivery trip started."
         ),
 
         "batch_id": str(
             batch.id
         ),
 
-        "batch_status": batch.status,
+        "batch_status": (
+            batch.status
+        ),
 
         "started_at": (
             batch.started_at.isoformat()
         ),
+
+        "pickup_summary": {
+            "total_pickup_stops": len(
+                pickups
+            ),
+
+            "completed_pickups": len(
+                [
+                    pickup
+                    for pickup in pickups
+                    if pickup.status
+                    == "picked_up"
+                ]
+            ),
+
+            "expected_tiffins": (
+                expected_total
+            ),
+
+            "received_tiffins": (
+                received_total
+            ),
+        },
 
         "current_delivery": {
             "delivery_order_id": str(

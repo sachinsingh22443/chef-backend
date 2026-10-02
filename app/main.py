@@ -19,6 +19,7 @@ from app.api.v1 import delivery
 # Models
 from app.models.refresh_token import RefreshToken
 from app.models.delivery_partner import DeliveryPartnerProfile
+from app.models.delivery_batch_pickup import DeliveryBatchPickup
 from app.api.v1.delivery_assignment import router as delivery_assignment_router
 from app.api.v1.delivery_batch import router as delivery_batch_router
 from app.models import (

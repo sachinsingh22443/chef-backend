@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.models.user import User
 from app.models.delivery_partner import DeliveryPartnerProfile
+from app.models.delivery_batch_pickup import DeliveryBatchPickup
+from app.models.user import ChefProfile
 from app.models.delivery_order import DeliveryOrder
 from app.models.delivery_batch import DeliveryBatch
 from app.models.order import Order
@@ -21,6 +23,7 @@ from app.models.order_item import OrderItem
 # ============================================================
 
 MAX_TIFFINS_PER_BATCH = 30
+CLUSTER_RADIUS_KM = 2.0
 
 ELIGIBLE_DELIVERY_STATUSES = {
     "waiting",
@@ -348,6 +351,316 @@ def choose_best_driver(
 # This reduces unnecessary travel compared with random order.
 # ============================================================
 
+
+# ============================================================
+# GET CLUSTER CENTER
+# ============================================================
+
+def get_cluster_center(cluster):
+    """
+    Calculate geographical center of a cluster.
+
+    cluster format:
+    [
+        (delivery_order, order),
+        ...
+    ]
+
+    Returns:
+        (latitude, longitude)
+    """
+
+    valid_points = []
+
+    for delivery_order, order in cluster:
+
+        if (
+            delivery_order.latitude is None
+            or delivery_order.longitude is None
+        ):
+            continue
+
+        valid_points.append(
+            (
+                float(delivery_order.latitude),
+                float(delivery_order.longitude),
+            )
+        )
+
+    if not valid_points:
+        return None, None
+
+    latitude = sum(
+        point[0]
+        for point in valid_points
+    ) / len(valid_points)
+
+    longitude = sum(
+        point[1]
+        for point in valid_points
+    ) / len(valid_points)
+
+    return latitude, longitude
+
+
+# ============================================================
+# BUILD GEOGRAPHICAL CLUSTERS
+# ============================================================
+
+def build_geographical_clusters(
+    orders,
+    radius_km=CLUSTER_RADIUS_KM,
+):
+    """
+    Group delivery orders geographically.
+
+    Important rules:
+    - Orders must already belong to same date + meal group.
+    - A cluster is created around a seed order.
+    - New orders are added only when they are within
+      radius_km of the current cluster center.
+    - No tiffin limit is applied here.
+    - 30-tiffin splitting happens later.
+
+    Returns:
+        [
+            [
+                (delivery_order, order),
+                ...
+            ],
+            ...
+        ]
+    """
+
+    remaining = list(orders)
+    clusters = []
+
+    while remaining:
+
+        # ----------------------------------------------------
+        # Take oldest order as cluster seed
+        # ----------------------------------------------------
+
+        seed = remaining.pop(0)
+
+        seed_order = seed[0]
+
+        cluster = [seed]
+
+        # ----------------------------------------------------
+        # Initial cluster center
+        # ----------------------------------------------------
+
+        center_lat = seed_order.latitude
+        center_lon = seed_order.longitude
+
+        if (
+            center_lat is None
+            or center_lon is None
+        ):
+            clusters.append(cluster)
+            continue
+
+        # ----------------------------------------------------
+        # Find nearby orders
+        # ----------------------------------------------------
+
+        nearby = []
+
+        for item in remaining:
+
+            delivery_order, order = item
+
+            if (
+                delivery_order.latitude is None
+                or delivery_order.longitude is None
+            ):
+                continue
+
+            distance = haversine_km(
+                center_lat,
+                center_lon,
+                delivery_order.latitude,
+                delivery_order.longitude,
+            )
+
+            if (
+                distance is not None
+                and distance <= radius_km
+            ):
+                nearby.append(item)
+
+        # ----------------------------------------------------
+        # Add nearby orders
+        # ----------------------------------------------------
+
+        for item in nearby:
+
+            cluster.append(item)
+
+            remaining.remove(item)
+
+            # Recalculate cluster center
+            center_lat, center_lon = (
+                get_cluster_center(cluster)
+            )
+
+        clusters.append(cluster)
+
+    return clusters
+
+
+# ============================================================
+# SPLIT CLUSTER INTO MAX 30 TIFFIN BATCH GROUPS
+# ============================================================
+
+def split_cluster_by_tiffin_capacity(
+    cluster,
+    max_tiffins=MAX_TIFFINS_PER_BATCH,
+):
+    """
+    Split one geographical cluster into groups
+    of maximum 30 tiffins.
+
+    Important:
+    - Individual order is never split.
+    - One order greater than 30 tiffins cannot be assigned.
+    """
+
+    batches = []
+
+    current_batch = []
+    current_tiffins = 0
+
+    # --------------------------------------------------------
+    # Keep geographically close orders together.
+    # --------------------------------------------------------
+
+    cluster_center = get_cluster_center(cluster)
+
+    if cluster_center == (None, None):
+        return []
+
+    center_lat, center_lon = cluster_center
+
+    sorted_cluster = sorted(
+        cluster,
+        key=lambda item: (
+            haversine_km(
+                center_lat,
+                center_lon,
+                item[0].latitude,
+                item[0].longitude,
+            )
+            or float("inf")
+        ),
+    )
+
+    for item in sorted_cluster:
+
+        delivery_order, order = item
+
+        quantity = int(
+            delivery_order.total_tiffins or 0
+        )
+
+        # ----------------------------------------------------
+        # Invalid / zero quantity
+        # ----------------------------------------------------
+
+        if quantity <= 0:
+            continue
+
+        # ----------------------------------------------------
+        # Single order larger than batch capacity
+        # ----------------------------------------------------
+
+        if quantity > max_tiffins:
+            continue
+
+        # ----------------------------------------------------
+        # Does order fit?
+        # ----------------------------------------------------
+
+        if (
+            current_tiffins + quantity
+            <= max_tiffins
+        ):
+
+            current_batch.append(item)
+
+            current_tiffins += quantity
+
+        else:
+
+            if current_batch:
+                batches.append(current_batch)
+
+            current_batch = [item]
+            current_tiffins = quantity
+
+    # --------------------------------------------------------
+    # Add final batch
+    # --------------------------------------------------------
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+# ============================================================
+# CHOOSE DRIVER FOR GEOGRAPHICAL CLUSTER
+# ============================================================
+
+def choose_best_driver_for_cluster(
+    drivers,
+    cluster,
+):
+    """
+    Select driver closest to geographical center
+    of the cluster.
+    """
+
+    center_lat, center_lon = (
+        get_cluster_center(cluster)
+    )
+
+    if (
+        center_lat is None
+        or center_lon is None
+    ):
+        return None
+
+    best_driver = None
+    best_distance = None
+
+    for user, profile in drivers:
+
+        distance = haversine_km(
+            profile.current_latitude,
+            profile.current_longitude,
+            center_lat,
+            center_lon,
+        )
+
+        if distance is None:
+            continue
+
+        if (
+            best_distance is None
+            or distance < best_distance
+        ):
+            best_distance = distance
+
+            best_driver = (
+                user,
+                profile,
+                distance,
+            )
+
+    return best_driver
+
 def optimize_order_sequence(
     driver_lat,
     driver_lon,
@@ -440,6 +753,323 @@ def create_batch(
 
     return batch
 
+
+# ============================================================
+# CREATE CHEF-WISE PICKUP STOPS FOR BATCH
+# ============================================================
+
+def create_batch_pickup_stops(
+    db: Session,
+    batch: DeliveryBatch,
+    delivery_orders,
+    driver_latitude=None,
+    driver_longitude=None,
+):
+    """
+    Create chef-wise pickup stops for a delivery batch.
+
+    Example:
+
+        Chef A -> 8 tiffins
+        Chef B -> 10 tiffins
+        Chef C -> 6 tiffins
+
+    Creates:
+
+        Pickup 1 -> Chef A -> 8
+        Pickup 2 -> Chef B -> 10
+        Pickup 3 -> Chef C -> 6
+
+    Pickup route starts from driver's current location.
+    """
+
+    # --------------------------------------------------------
+    # 1. GROUP DELIVERY ORDERS BY CHEF
+    # --------------------------------------------------------
+
+    chef_groups = defaultdict(int)
+
+    for delivery_order, order in delivery_orders:
+
+        chef_id = getattr(order, "chef_id", None)
+
+        if not chef_id:
+            continue
+
+        quantity = int(
+            delivery_order.total_tiffins or 0
+        )
+
+        if quantity <= 0:
+            continue
+
+        chef_groups[chef_id] += quantity
+
+    # --------------------------------------------------------
+    # NO CHEF FOUND
+    # --------------------------------------------------------
+
+    if not chef_groups:
+        return []
+
+    # --------------------------------------------------------
+    # 2. FETCH CHEF PROFILES
+    # --------------------------------------------------------
+
+    chef_ids = list(chef_groups.keys())
+
+    chef_rows = (
+        db.query(
+            User,
+            ChefProfile,
+        )
+        .join(
+            ChefProfile,
+            ChefProfile.user_id == User.id,
+        )
+        .filter(
+            User.id.in_(chef_ids)
+        )
+        .all()
+    )
+
+    # --------------------------------------------------------
+    # 3. PREPARE CHEF PICKUP POINTS
+    # --------------------------------------------------------
+
+    pickup_points = []
+
+    for chef_user, chef_profile in chef_rows:
+
+        expected_tiffins = int(
+            chef_groups.get(
+                chef_user.id,
+                0,
+            )
+        )
+
+        if expected_tiffins <= 0:
+            continue
+
+        latitude = chef_profile.latitude
+        longitude = chef_profile.longitude
+
+        # ----------------------------------------------------
+        # Chef location missing
+        # ----------------------------------------------------
+
+        if latitude is None or longitude is None:
+
+            pickup_points.append(
+                {
+                    "chef_id": chef_user.id,
+                    "chef_name": (
+                        chef_user.name
+                        or "Chef"
+                    ),
+                    "kitchen_location": (
+                        chef_profile.location
+                        if chef_profile
+                        else None
+                    ),
+                    "latitude": None,
+                    "longitude": None,
+                    "expected_tiffins": expected_tiffins,
+                    "distance": None,
+                }
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Calculate distance from driver
+        # ----------------------------------------------------
+
+        distance = haversine_km(
+            driver_latitude,
+            driver_longitude,
+            latitude,
+            longitude,
+        )
+
+        pickup_points.append(
+            {
+                "chef_id": chef_user.id,
+                "chef_name": (
+                    chef_user.name
+                    or "Chef"
+                ),
+                "kitchen_location": (
+                    chef_profile.location
+                    if chef_profile
+                    else None
+                ),
+                "latitude": latitude,
+                "longitude": longitude,
+                "expected_tiffins": expected_tiffins,
+                "distance": distance,
+            }
+        )
+
+    # --------------------------------------------------------
+    # 4. REMOVE INVALID LOCATION POINTS FROM ROUTE
+    # --------------------------------------------------------
+
+    valid_points = [
+        point
+        for point in pickup_points
+        if point["latitude"] is not None
+        and point["longitude"] is not None
+    ]
+
+    invalid_points = [
+        point
+        for point in pickup_points
+        if point["latitude"] is None
+        or point["longitude"] is None
+    ]
+
+    # --------------------------------------------------------
+    # 5. NEAREST-NEIGHBOUR PICKUP ROUTE
+    # --------------------------------------------------------
+
+    ordered_points = []
+
+    remaining = list(valid_points)
+
+    current_latitude = driver_latitude
+    current_longitude = driver_longitude
+
+    while remaining:
+
+        best_point = None
+        best_distance = None
+
+        for point in remaining:
+
+            distance = haversine_km(
+                current_latitude,
+                current_longitude,
+                point["latitude"],
+                point["longitude"],
+            )
+
+            if distance is None:
+                continue
+
+            if (
+                best_distance is None
+                or distance < best_distance
+            ):
+                best_distance = distance
+                best_point = point
+
+        if best_point is None:
+            break
+
+        ordered_points.append(best_point)
+
+        remaining.remove(best_point)
+
+        current_latitude = (
+            best_point["latitude"]
+        )
+
+        current_longitude = (
+            best_point["longitude"]
+        )
+
+    # --------------------------------------------------------
+    # 6. INVALID LOCATION CHEFS GO AT END
+    # --------------------------------------------------------
+
+    ordered_points.extend(
+        invalid_points
+    )
+
+    # --------------------------------------------------------
+    # 7. CREATE PICKUP DATABASE ROWS
+    # --------------------------------------------------------
+
+    pickup_stops = []
+
+    for sequence_no, point in enumerate(
+        ordered_points,
+        start=1,
+    ):
+
+        # ----------------------------------------------------
+        # Prevent duplicate pickup stop
+        # ----------------------------------------------------
+
+        existing = (
+            db.query(DeliveryBatchPickup)
+            .filter(
+                DeliveryBatchPickup.batch_id
+                == batch.id,
+
+                DeliveryBatchPickup.chef_id
+                == point["chef_id"],
+            )
+            .first()
+        )
+
+        if existing:
+
+            pickup_stops.append(existing)
+
+            continue
+
+        # ----------------------------------------------------
+        # CREATE PICKUP
+        # ----------------------------------------------------
+
+        pickup = DeliveryBatchPickup(
+
+            batch_id=batch.id,
+
+            chef_id=point["chef_id"],
+
+            sequence_no=sequence_no,
+
+            chef_name=point["chef_name"],
+
+            kitchen_location=(
+                point["kitchen_location"]
+            ),
+
+            latitude=point["latitude"],
+
+            longitude=point["longitude"],
+
+            expected_tiffins=(
+                point["expected_tiffins"]
+            ),
+
+            received_tiffins=0,
+
+            status="pending",
+
+            arrived_at=None,
+
+            picked_up_at=None,
+
+            created_at=datetime.utcnow(),
+
+            updated_at=datetime.utcnow(),
+        )
+
+        db.add(pickup)
+
+        pickup_stops.append(pickup)
+
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
+
+    db.flush()
+
+    return pickup_stops
 
 # ============================================================
 # ASSIGN ONE DELIVERY ORDER
@@ -589,412 +1219,428 @@ def run_delivery_assignment(
     # 4. PROCESS EACH DATE + MEAL GROUP
     # --------------------------------------------------------
 
+        # --------------------------------------------------------
+    # 4. PROCESS EACH DATE + MEAL GROUP
+    # --------------------------------------------------------
+
     for (
         group_date,
         group_meal,
     ), group_orders in groups.items():
 
-        # Copy group orders
-        remaining = list(group_orders)
+        # ====================================================
+        # STEP A
+        # BUILD GEOGRAPHICAL CLUSTERS
+        # ====================================================
 
-        # ----------------------------------------------------
-        # KEEP PROCESSING UNTIL:
-        #
-        # - all orders assigned
-        # OR
-        # - no driver available
-        # ----------------------------------------------------
+        geographical_clusters = (
+            build_geographical_clusters(
+                group_orders,
+                radius_km=CLUSTER_RADIUS_KM,
+            )
+        )
 
-        while remaining:
+        # ====================================================
+        # PROCESS EACH AREA CLUSTER
+        # ====================================================
 
-            # ------------------------------------------------
-            # FIND BEST DRIVER + BEST ORDER
-            #
-            # Driver nearest to customer
-            # ------------------------------------------------
+        for cluster_index, cluster in enumerate(
+            geographical_clusters,
+            start=1,
+        ):
 
-            best_driver = None
-            best_order = None
-            best_distance = None
+            if not cluster:
+                continue
 
-            for delivery_order, order in remaining:
+            # =================================================
+            # STEP B
+            # SPLIT AREA INTO MAX 30 TIFFIN BATCHES
+            # =================================================
 
-                selected = choose_best_driver(
-                    drivers,
-                    delivery_order,
+            cluster_batches = (
+                split_cluster_by_tiffin_capacity(
+                    cluster,
+                    max_tiffins=MAX_TIFFINS_PER_BATCH,
                 )
+            )
 
-                if selected is None:
+            # =================================================
+            # PROCESS EACH 30-TIFFIN BATCH
+            # =================================================
+
+            for cluster_batch in cluster_batches:
+
+                if not cluster_batch:
                     continue
 
-                user, profile, distance = selected
+                # =================================================
+                # STEP C
+                # FIND DRIVER NEAREST TO AREA
+                # =================================================
 
-                if (
-                    best_distance is None
-                    or distance < best_distance
-                ):
-                    best_distance = distance
-
-                    best_driver = (
-                        user,
-                        profile,
+                selected_driver = (
+                    choose_best_driver_for_cluster(
+                        drivers,
+                        cluster_batch,
                     )
+                )
 
-                    best_order = (
-                        delivery_order,
-                        order,
-                    )
+                if selected_driver is None:
+                    continue
 
-            # ------------------------------------------------
-            # NO DRIVER AVAILABLE
-            # ------------------------------------------------
+                (
+                    driver_user,
+                    driver_profile,
+                    driver_distance,
+                ) = selected_driver
 
-            if best_driver is None:
-                break
+                # =================================================
+                # STEP D
+                # CHECK DRIVER ACTIVE BATCH
+                # =================================================
 
-            driver_user, driver_profile = (
-                best_driver
-            )
-
-            # ------------------------------------------------
-            # CHECK EXISTING ACTIVE BATCH
-            # ------------------------------------------------
-
-            batch = get_active_batch_for_driver(
-                db=db,
-                driver_id=driver_user.id,
-                delivery_date=group_date,
-                meal_type=group_meal,
-            )
-
-            # ------------------------------------------------
-            # CREATE NEW BATCH
-            # ------------------------------------------------
-
-            if batch is None:
-
-                batch = create_batch(
+                batch = get_active_batch_for_driver(
                     db=db,
                     driver_id=driver_user.id,
                     delivery_date=group_date,
                     meal_type=group_meal,
                 )
 
-                batches_created_count += 1
+                # =================================================
+                # CREATE NEW BATCH
+                # =================================================
 
-                # Driver is now busy
-                driver_profile.is_available = False
+                if batch is None:
 
-                # Save driver's location as batch start
-                batch.start_latitude = (
-                    driver_profile.current_latitude
+                    batch = create_batch(
+                        db=db,
+                        driver_id=driver_user.id,
+                        delivery_date=group_date,
+                        meal_type=group_meal,
+                    )
+
+                    batches_created_count += 1
+
+                    # Driver becomes busy
+                    driver_profile.is_available = False
+
+                    # Driver starting location
+                    batch.start_latitude = (
+                        driver_profile.current_latitude
+                    )
+
+                    batch.start_longitude = (
+                        driver_profile.current_longitude
+                    )
+
+                    batch.assigned_at = (
+                        datetime.utcnow()
+                    )
+
+                    db.add(batch)
+                    db.add(driver_profile)
+
+                    db.flush()
+
+                # =================================================
+                # CHECK REMAINING CAPACITY
+                # =================================================
+
+                current_tiffins = get_batch_tiffins(
+                    db=db,
+                    batch_id=batch.id,
                 )
 
-                batch.start_longitude = (
-                    driver_profile.current_longitude
+                remaining_capacity = (
+                    MAX_TIFFINS_PER_BATCH
+                    - current_tiffins
                 )
 
-                batch.assigned_at = (
-                    datetime.utcnow()
-                )
+                if remaining_capacity <= 0:
 
-                db.add(batch)
-                db.add(driver_profile)
+                    driver_profile.is_available = False
 
-                # Make sure batch exists in DB
-                db.flush()
+                    db.add(driver_profile)
 
-            # ------------------------------------------------
-            # CURRENT BATCH TIFFINS
-            # ------------------------------------------------
+                    # Driver removed from current run
+                    drivers = [
+                        item
+                        for item in drivers
+                        if item[0].id
+                        != driver_user.id
+                    ]
 
-            current_tiffins = get_batch_tiffins(
-                db=db,
-                batch_id=batch.id,
-            )
+                    if not drivers:
+                        break
 
-            remaining_capacity = (
-                MAX_TIFFINS_PER_BATCH
-                - current_tiffins
-            )
-
-            # ------------------------------------------------
-            # BATCH FULL
-            # ------------------------------------------------
-
-            if remaining_capacity <= 0:
-
-                # Driver cannot take more
-                driver_profile.is_available = False
-
-                db.add(driver_profile)
-
-                # Remove this driver from this assignment run
-                drivers = [
-                    item
-                    for item in drivers
-                    if item[0].id != driver_user.id
-                ]
-
-                if not drivers:
-                    break
-
-                continue
-
-            # ------------------------------------------------
-            # FIND ORDERS THAT FIT INSIDE 30 TIFFIN LIMIT
-            # ------------------------------------------------
-
-            fitting_orders = [
-                item
-                for item in remaining
-                if int(
-                    item[0].total_tiffins or 0
-                ) <= remaining_capacity
-            ]
-
-            # ------------------------------------------------
-            # NO ORDER FITS
-            # ------------------------------------------------
-
-            if not fitting_orders:
-
-                drivers = [
-                    item
-                    for item in drivers
-                    if item[0].id != driver_user.id
-                ]
-
-                if not drivers:
-                    break
-
-                continue
-
-            # ------------------------------------------------
-            # OPTIMIZE DELIVERY ORDER
-            #
-            # Driver location
-            #       ↓
-            # nearest customer
-            #       ↓
-            # next nearest customer
-            #       ↓
-            # next nearest customer
-            # ------------------------------------------------
-
-            optimized = optimize_order_sequence(
-                driver_profile.current_latitude,
-                driver_profile.current_longitude,
-                fitting_orders,
-            )
-
-            if not optimized:
-                break
-
-            # ------------------------------------------------
-            # ASSIGN ORDERS
-            # ------------------------------------------------
-
-            batch_current_tiffins = current_tiffins
-
-            sequence_no = get_next_sequence(
-                db=db,
-                batch_id=batch.id,
-            )
-
-            assigned_from_group = []
-
-            for delivery_order, order in optimized:
-
-                quantity = int(
-                    delivery_order.total_tiffins
-                    or 0
-                )
-
-                # --------------------------------------------
-                # Check 30 TIFFIN limit
-                # --------------------------------------------
-
-                if (
-                    batch_current_tiffins
-                    + quantity
-                    > MAX_TIFFINS_PER_BATCH
-                ):
                     continue
 
-                # --------------------------------------------
-                # Assign delivery order
-                # --------------------------------------------
+                # =================================================
+                # STEP E
+                # FILTER ORDERS THAT FIT
+                # =================================================
 
-                assign_delivery_order(
+                fitting_orders = []
+
+                for item in cluster_batch:
+
+                    delivery_order, order = item
+
+                    quantity = int(
+                        delivery_order.total_tiffins
+                        or 0
+                    )
+
+                    if quantity <= 0:
+                        continue
+
+                    if (
+                        quantity
+                        <= remaining_capacity
+                    ):
+                        fitting_orders.append(item)
+
+                if not fitting_orders:
+                    continue
+
+                # =================================================
+                # STEP F
+                # OPTIMIZE DELIVERY ROUTE
+                # =================================================
+
+                optimized = optimize_order_sequence(
+                    driver_profile.current_latitude,
+                    driver_profile.current_longitude,
+                    fitting_orders,
+                )
+
+                if not optimized:
+                    continue
+
+                # =================================================
+                # STEP G
+                # ASSIGN ORDERS
+                # =================================================
+
+                batch_current_tiffins = (
+                    current_tiffins
+                )
+
+                sequence_no = get_next_sequence(
                     db=db,
-                    delivery_order=delivery_order,
+                    batch_id=batch.id,
+                )
+
+                assigned_from_cluster = []
+
+                for (
+                    delivery_order,
+                    order,
+                ) in optimized:
+
+                    quantity = int(
+                        delivery_order.total_tiffins
+                        or 0
+                    )
+
+                    # --------------------------------------------
+                    # NEVER EXCEED 30 TIFFINS
+                    # --------------------------------------------
+
+                    if (
+                        batch_current_tiffins
+                        + quantity
+                        > MAX_TIFFINS_PER_BATCH
+                    ):
+                        continue
+
+                    # --------------------------------------------
+                    # ASSIGN
+                    # --------------------------------------------
+
+                    assign_delivery_order(
+                        db=db,
+                        delivery_order=delivery_order,
+                        batch=batch,
+                        sequence_no=sequence_no,
+                    )
+
+                    # --------------------------------------------
+                    # UPDATE COUNTERS
+                    # --------------------------------------------
+
+                    batch_current_tiffins += quantity
+
+                    sequence_no += 1
+
+                    assigned_orders_count += 1
+
+                    assigned_tiffins_count += quantity
+
+                    assigned_from_cluster.append(
+                        delivery_order
+                    )
+
+                    # --------------------------------------------
+                    # RESPONSE DATA
+                    # --------------------------------------------
+
+                    assignment_results.append(
+                        {
+                            "delivery_order_id": str(
+                                delivery_order.id
+                            ),
+
+                            "order_id": str(
+                                delivery_order.order_id
+                            ),
+
+                            "delivery_partner_id": str(
+                                driver_user.id
+                            ),
+
+                            "batch_id": str(
+                                batch.id
+                            ),
+
+                            "sequence_no": (
+                                delivery_order.sequence_no
+                            ),
+
+                            "tiffins": quantity,
+
+                            "meal_type": group_meal,
+
+                            "delivery_date": str(
+                                group_date
+                            ),
+
+                            "cluster_index": (
+                                cluster_index
+                            ),
+
+                            "cluster_radius_km": (
+                                CLUSTER_RADIUS_KM
+                            ),
+
+                            "driver_distance_to_cluster_km": (
+                                round(
+                                    driver_distance,
+                                    3,
+                                )
+                            ),
+                        }
+                    )
+
+                # =================================================
+                # FLUSH
+                # =================================================
+
+                db.flush()
+
+                # =================================================
+                # RECALCULATE BATCH TOTALS
+                # =================================================
+                # ============================================================
+                # CREATE / UPDATE CHEF-WISE PICKUP STOPS
+                # ============================================================
+                
+                batch_delivery_orders = (
+                    db.query(
+                        DeliveryOrder,
+                        Order,
+                    )
+                    .join(
+                        Order,
+                        Order.id == DeliveryOrder.order_id,
+                    )
+                    .filter(
+                        DeliveryOrder.batch_id == batch.id,
+                    )
+                    .all()
+                )
+                
+                pickup_stops = create_batch_pickup_stops(
+                    db=db,
                     batch=batch,
-                    sequence_no=sequence_no,
+                    delivery_orders=batch_delivery_orders,
+                    driver_latitude=batch.start_latitude,
+                    driver_longitude=batch.start_longitude,
+                )
+                
+                batch_orders = (
+                    db.query(DeliveryOrder)
+                    .filter(
+                        DeliveryOrder.batch_id
+                        == batch.id
+                    )
+                    .all()
                 )
 
-                # --------------------------------------------
-                # Update counters
-                # --------------------------------------------
-
-                batch_current_tiffins += quantity
-
-                sequence_no += 1
-
-                assigned_orders_count += 1
-
-                assigned_tiffins_count += quantity
-
-                assigned_from_group.append(
-                    delivery_order
+                batch.total_orders = len(
+                    batch_orders
                 )
 
-                # --------------------------------------------
-                # Assignment response
-                # --------------------------------------------
-
-                assignment_results.append(
-                    {
-                        "delivery_order_id": str(
-                            delivery_order.id
-                        ),
-
-                        "order_id": str(
-                            delivery_order.order_id
-                        ),
-
-                        "delivery_partner_id": str(
-                            driver_user.id
-                        ),
-
-                        "batch_id": str(
-                            batch.id
-                        ),
-
-                        "sequence_no": (
-                            delivery_order.sequence_no
-                        ),
-
-                        "tiffins": quantity,
-
-                        "meal_type": group_meal,
-
-                        "delivery_date": str(
-                            group_date
-                        ),
-
-                        "distance_from_driver_km": (
-                            round(
-                                haversine_km(
-                                    driver_profile.current_latitude,
-                                    driver_profile.current_longitude,
-                                    delivery_order.latitude,
-                                    delivery_order.longitude,
-                                ),
-                                3,
-                            )
-                        ),
-                    }
+                batch.total_tiffins = sum(
+                    int(
+                        item.total_tiffins
+                        or 0
+                    )
+                    for item in batch_orders
                 )
 
-            # ------------------------------------------------
-            # IMPORTANT
-            #
-            # DeliveryOrder records were added using db.add()
-            # but may not yet be visible to count queries.
-            #
-            # Flush first.
-            # ------------------------------------------------
+                batch.status = "assigned"
 
-            db.flush()
+                if not batch.assigned_at:
+                    batch.assigned_at = (
+                        datetime.utcnow()
+                    )
 
-            # ------------------------------------------------
-            # RECALCULATE BATCH TOTALS FROM DATABASE
-            # ------------------------------------------------
+                db.add(batch)
 
-            batch_orders = (
-                db.query(DeliveryOrder)
-                .filter(
-                    DeliveryOrder.batch_id
-                    == batch.id
-                )
-                .all()
-            )
+                # =================================================
+                # REMOVE ASSIGNED ORDERS FROM CLUSTER
+                # =================================================
 
-            # Total number of orders
-            batch.total_orders = len(
-                batch_orders
-            )
+                assigned_ids = {
+                    item.id
+                    for item in assigned_from_cluster
+                }
 
-            # Total number of tiffins
-            batch.total_tiffins = sum(
-                int(
-                    delivery_order.total_tiffins
-                    or 0
-                )
-                for delivery_order
-                in batch_orders
-            )
+                cluster_batch = [
+                    item
+                    for item in cluster_batch
+                    if item[0].id
+                    not in assigned_ids
+                ]
 
-            # ------------------------------------------------
-            # BATCH STATUS
-            # ------------------------------------------------
+                # =================================================
+                # DRIVER BECOMES BUSY
+                # =================================================
 
-            batch.status = "assigned"
+                driver_profile.is_available = False
 
-            if not batch.assigned_at:
-                batch.assigned_at = (
-                    datetime.utcnow()
-                )
+                db.add(driver_profile)
 
-            db.add(batch)
+                # =================================================
+                # ONE DRIVER = ONE ACTIVE TRIP
+                # =================================================
 
-            # ------------------------------------------------
-            # REMOVE ASSIGNED ORDERS
-            # ------------------------------------------------
+                drivers = [
+                    item
+                    for item in drivers
+                    if item[0].id
+                    != driver_user.id
+                ]
 
-            assigned_ids = {
-                item.id
-                for item in assigned_from_group
-            }
-
-            remaining = [
-                item
-                for item in remaining
-                if item[0].id
-                not in assigned_ids
-            ]
-
-            # ------------------------------------------------
-            # DRIVER BECOMES BUSY
-            # ------------------------------------------------
-
-            driver_profile.is_available = False
-
-            db.add(driver_profile)
-
-            # ------------------------------------------------
-            # IF NO MORE ORDERS
-            # ------------------------------------------------
-
-            if not remaining:
-                break
-
-            # ------------------------------------------------
-            # DRIVER ALREADY HAS A BATCH
-            #
-            # Don't assign another batch to same driver
-            # during this assignment run.
-            # ------------------------------------------------
-
-            drivers = [
-                item
-                for item in drivers
-                if item[0].id != driver_user.id
-            ]
+                if not drivers:
+                    break
 
             if not drivers:
                 break
+
+        if not drivers:
+            break
 
     # --------------------------------------------------------
     # 5. COMMIT ALL ASSIGNMENTS
