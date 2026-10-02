@@ -758,6 +758,10 @@ def create_batch(
 # CREATE CHEF-WISE PICKUP STOPS FOR BATCH
 # ============================================================
 
+# ============================================================
+# CREATE / UPDATE CHEF-WISE PICKUP STOPS FOR BATCH
+# ============================================================
+
 def create_batch_pickup_stops(
     db: Session,
     batch: DeliveryBatch,
@@ -766,25 +770,20 @@ def create_batch_pickup_stops(
     driver_longitude=None,
 ):
     """
-    Create chef-wise pickup stops for a delivery batch.
+    Create / update chef-wise pickup stops.
 
-    Example:
-
-        Chef A -> 8 tiffins
-        Chef B -> 10 tiffins
-        Chef C -> 6 tiffins
-
-    Creates:
-
-        Pickup 1 -> Chef A -> 8
-        Pickup 2 -> Chef B -> 10
-        Pickup 3 -> Chef C -> 6
-
-    Pickup route starts from driver's current location.
+    Rules:
+    - One chef = one pickup stop per batch
+    - Multiple orders of same chef are combined
+    - Chef name comes from User
+    - ChefProfile is optional
+    - Chef location is taken from ChefProfile when available
+    - Existing pickup is updated instead of duplicated
+    - Existing pickup status is preserved
     """
 
     # --------------------------------------------------------
-    # 1. GROUP DELIVERY ORDERS BY CHEF
+    # 1. GROUP TIFFINS BY CHEF
     # --------------------------------------------------------
 
     chef_groups = defaultdict(int)
@@ -805,84 +804,88 @@ def create_batch_pickup_stops(
 
         chef_groups[chef_id] += quantity
 
-    # --------------------------------------------------------
-    # NO CHEF FOUND
-    # --------------------------------------------------------
-
     if not chef_groups:
         return []
 
     # --------------------------------------------------------
-    # 2. FETCH CHEF PROFILES
+    # 2. GET CHEFS
+    #
+    # IMPORTANT:
+    # Do NOT use INNER JOIN with ChefProfile.
+    # ChefProfile may be missing.
     # --------------------------------------------------------
 
     chef_ids = list(chef_groups.keys())
 
-    chef_rows = (
-        db.query(
-            User,
-            ChefProfile,
-        )
-        .join(
-            ChefProfile,
-            ChefProfile.user_id == User.id,
-        )
+    chef_users = (
+        db.query(User)
         .filter(
             User.id.in_(chef_ids)
         )
         .all()
     )
 
+    chef_profiles = (
+        db.query(ChefProfile)
+        .filter(
+            ChefProfile.user_id.in_(chef_ids)
+        )
+        .all()
+    )
+
+    profile_map = {
+        profile.user_id: profile
+        for profile in chef_profiles
+    }
+
+    user_map = {
+        user.id: user
+        for user in chef_users
+    }
+
     # --------------------------------------------------------
-    # 3. PREPARE CHEF PICKUP POINTS
+    # 3. PREPARE PICKUP POINTS
     # --------------------------------------------------------
 
     pickup_points = []
 
-    for chef_user, chef_profile in chef_rows:
-
-        expected_tiffins = int(
-            chef_groups.get(
-                chef_user.id,
-                0,
-            )
-        )
+    for chef_id, expected_tiffins in chef_groups.items():
 
         if expected_tiffins <= 0:
             continue
 
-        latitude = chef_profile.latitude
-        longitude = chef_profile.longitude
+        chef_user = user_map.get(chef_id)
+        chef_profile = profile_map.get(chef_id)
 
         # ----------------------------------------------------
-        # Chef location missing
+        # CHEF NAME
         # ----------------------------------------------------
 
-        if latitude is None or longitude is None:
+        chef_name = (
+            chef_user.name
+            if chef_user and chef_user.name
+            else "Chef"
+        )
 
-            pickup_points.append(
-                {
-                    "chef_id": chef_user.id,
-                    "chef_name": (
-                        chef_user.name
-                        or "Chef"
-                    ),
-                    "kitchen_location": (
-                        chef_profile.location
-                        if chef_profile
-                        else None
-                    ),
-                    "latitude": None,
-                    "longitude": None,
-                    "expected_tiffins": expected_tiffins,
-                    "distance": None,
-                }
+        # ----------------------------------------------------
+        # CHEF LOCATION
+        # ----------------------------------------------------
+
+        latitude = None
+        longitude = None
+        kitchen_location = None
+
+        if chef_profile:
+
+            latitude = chef_profile.latitude
+            longitude = chef_profile.longitude
+
+            kitchen_location = (
+                chef_profile.location
             )
 
-            continue
-
         # ----------------------------------------------------
-        # Calculate distance from driver
+        # DISTANCE FROM DRIVER
         # ----------------------------------------------------
 
         distance = haversine_km(
@@ -894,16 +897,9 @@ def create_batch_pickup_stops(
 
         pickup_points.append(
             {
-                "chef_id": chef_user.id,
-                "chef_name": (
-                    chef_user.name
-                    or "Chef"
-                ),
-                "kitchen_location": (
-                    chef_profile.location
-                    if chef_profile
-                    else None
-                ),
+                "chef_id": chef_id,
+                "chef_name": chef_name,
+                "kitchen_location": kitchen_location,
                 "latitude": latitude,
                 "longitude": longitude,
                 "expected_tiffins": expected_tiffins,
@@ -912,25 +908,29 @@ def create_batch_pickup_stops(
         )
 
     # --------------------------------------------------------
-    # 4. REMOVE INVALID LOCATION POINTS FROM ROUTE
+    # 4. SPLIT VALID / INVALID LOCATIONS
     # --------------------------------------------------------
 
     valid_points = [
         point
         for point in pickup_points
-        if point["latitude"] is not None
-        and point["longitude"] is not None
+        if (
+            point["latitude"] is not None
+            and point["longitude"] is not None
+        )
     ]
 
     invalid_points = [
         point
         for point in pickup_points
-        if point["latitude"] is None
-        or point["longitude"] is None
+        if (
+            point["latitude"] is None
+            or point["longitude"] is None
+        )
     ]
 
     # --------------------------------------------------------
-    # 5. NEAREST-NEIGHBOUR PICKUP ROUTE
+    # 5. OPTIMIZE PICKUP ROUTE
     # --------------------------------------------------------
 
     ordered_points = []
@@ -968,27 +968,19 @@ def create_batch_pickup_stops(
             break
 
         ordered_points.append(best_point)
-
         remaining.remove(best_point)
 
-        current_latitude = (
-            best_point["latitude"]
-        )
-
-        current_longitude = (
-            best_point["longitude"]
-        )
+        current_latitude = best_point["latitude"]
+        current_longitude = best_point["longitude"]
 
     # --------------------------------------------------------
-    # 6. INVALID LOCATION CHEFS GO AT END
+    # 6. CHEFS WITHOUT LOCATION AT END
     # --------------------------------------------------------
 
-    ordered_points.extend(
-        invalid_points
-    )
+    ordered_points.extend(invalid_points)
 
     # --------------------------------------------------------
-    # 7. CREATE PICKUP DATABASE ROWS
+    # 7. CREATE / UPDATE PICKUPS
     # --------------------------------------------------------
 
     pickup_stops = []
@@ -997,10 +989,6 @@ def create_batch_pickup_stops(
         ordered_points,
         start=1,
     ):
-
-        # ----------------------------------------------------
-        # Prevent duplicate pickup stop
-        # ----------------------------------------------------
 
         existing = (
             db.query(DeliveryBatchPickup)
@@ -1014,18 +1002,49 @@ def create_batch_pickup_stops(
             .first()
         )
 
+        # ====================================================
+        # UPDATE EXISTING PICKUP
+        # ====================================================
+
         if existing:
+
+            existing.sequence_no = sequence_no
+
+            existing.chef_name = (
+                point["chef_name"]
+            )
+
+            existing.kitchen_location = (
+                point["kitchen_location"]
+            )
+
+            existing.latitude = (
+                point["latitude"]
+            )
+
+            existing.longitude = (
+                point["longitude"]
+            )
+
+            existing.expected_tiffins = (
+                point["expected_tiffins"]
+            )
+
+            existing.updated_at = (
+                datetime.utcnow()
+            )
+
+            db.add(existing)
 
             pickup_stops.append(existing)
 
             continue
 
-        # ----------------------------------------------------
-        # CREATE PICKUP
-        # ----------------------------------------------------
+        # ====================================================
+        # CREATE NEW PICKUP
+        # ====================================================
 
         pickup = DeliveryBatchPickup(
-
             batch_id=batch.id,
 
             chef_id=point["chef_id"],
@@ -1070,11 +1089,112 @@ def create_batch_pickup_stops(
     db.flush()
 
     return pickup_stops
-
 # ============================================================
 # ASSIGN ONE DELIVERY ORDER
 # ============================================================
+# ============================================================
+# REPAIR EXISTING ACTIVE BATCH PICKUPS
+# ============================================================
 
+def repair_active_batch_pickups(
+    db: Session,
+):
+    """
+    Repair / rebuild pickup stops for all active batches.
+
+    Useful when:
+    - batch already exists
+    - orders already assigned
+    - pickup rows were not created
+    - new orders were added to an existing batch
+    """
+
+    active_batches = (
+        db.query(DeliveryBatch)
+        .filter(
+            DeliveryBatch.status.in_(
+                list(ACTIVE_BATCH_STATUSES)
+            )
+        )
+        .all()
+    )
+
+    repaired_batches = 0
+    repaired_pickups = 0
+
+    for batch in active_batches:
+
+        batch_delivery_orders = (
+            db.query(
+                DeliveryOrder,
+                Order,
+            )
+            .join(
+                Order,
+                Order.id
+                == DeliveryOrder.order_id,
+            )
+            .filter(
+                DeliveryOrder.batch_id
+                == batch.id,
+            )
+            .all()
+        )
+
+        if not batch_delivery_orders:
+            continue
+
+        pickup_stops = (
+            create_batch_pickup_stops(
+                db=db,
+                batch=batch,
+                delivery_orders=batch_delivery_orders,
+                driver_latitude=(
+                    batch.start_latitude
+                ),
+                driver_longitude=(
+                    batch.start_longitude
+                ),
+            )
+        )
+
+        # ----------------------------------------------------
+        # RECALCULATE BATCH TOTALS
+        # ----------------------------------------------------
+
+        batch_orders = (
+            db.query(DeliveryOrder)
+            .filter(
+                DeliveryOrder.batch_id
+                == batch.id
+            )
+            .all()
+        )
+
+        batch.total_orders = len(
+            batch_orders
+        )
+
+        batch.total_tiffins = sum(
+            int(
+                item.total_tiffins or 0
+            )
+            for item in batch_orders
+        )
+
+        db.add(batch)
+
+        repaired_batches += 1
+        repaired_pickups += len(
+            pickup_stops
+        )
+
+    db.flush()
+
+    return {
+        "repaired_batches": repaired_batches,
+        "repaired_pickups": repaired_pickups,
+    }
 def assign_delivery_order(
     db: Session,
     delivery_order,
@@ -1128,6 +1248,9 @@ def run_delivery_assignment(
     # --------------------------------------------------------
     # 1. GET ELIGIBLE DRIVERS
     # --------------------------------------------------------
+    repair_result = repair_active_batch_pickups(
+        db=db
+    )
 
     drivers = get_eligible_delivery_partners(db)
 
@@ -1164,6 +1287,7 @@ def run_delivery_assignment(
             "assigned_tiffins": 0,
             "batches_created": 0,
             "unassigned_orders": 0,
+            "pickup_repair": repair_result,
             "assignments": [],
         }
 
@@ -1735,6 +1859,8 @@ def run_delivery_assignment(
         "batches_created": (
             batches_created_count
         ),
+        
+        "pickup_repair": repair_result,
 
         "unassigned_orders": (
             unassigned_orders_count
@@ -1744,3 +1870,5 @@ def run_delivery_assignment(
             assignment_results
         ),
     }
+    
+    
