@@ -6,6 +6,7 @@ from sqlalchemy import (
     String,
     Boolean,
     Float,
+    Date, 
     DateTime,
     ForeignKey,
     Index,
@@ -67,7 +68,41 @@ class DeliveryPartnerProfile(Base):
     # Current location
     current_latitude = Column(Float, nullable=True)
     current_longitude = Column(Float, nullable=True)
+    
+    employee_id = Column(
+        String(50),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
 
+    joining_date = Column(
+        Date,
+        nullable=True,
+    )
+    
+    employment_type = Column(
+        String(30),
+        nullable=False,
+        default="full_time",
+    )
+    
+    joining_location = Column(
+        String(150),
+        nullable=True,
+    )
+    
+    reporting_manager = Column(
+        String(150),
+        nullable=True,
+    )
+    
+    employment_status = Column(
+        String(30),
+        nullable=False,
+        default="active",
+    )
+    
     # Application
     application_status = Column(
         String,
