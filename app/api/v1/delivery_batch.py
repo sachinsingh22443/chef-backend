@@ -17,7 +17,7 @@ from app.models.delivery_batch import DeliveryBatch
 from app.models.delivery_order import DeliveryOrder
 from app.models.order import Order
 from app.models.delivery_batch_pickup import DeliveryBatchPickup
-
+from app.services.delivery_earning import create_delivery_earning
 
 router = APIRouter(
     prefix="/delivery/batches",
@@ -905,6 +905,14 @@ def deliver_order(
     delivery_order.delivery_status = "delivered"
     delivery_order.delivered_at = now
     order.status = "delivered"
+    
+    create_delivery_earning(
+        db=db,
+        delivery_order=delivery_order,
+        order=order,
+        delivery_partner_id=current_user.id,
+        batch_id=batch.id,
+    )
 
     db.add(delivery_order)
     db.add(order)

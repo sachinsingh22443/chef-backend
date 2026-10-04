@@ -22,6 +22,7 @@ from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models.delivery_batch_pickup import DeliveryBatchPickup
 from app.api.v1.delivery_assignment import router as delivery_assignment_router
 from app.api.v1.delivery_batch import router as delivery_batch_router
+from app.api.v1.delivery_earnings import router as delivery_earnings_router
 from app.models import (
     user,
     menu,
@@ -136,6 +137,9 @@ app.include_router(
 )
 app.include_router(
     delivery_batch_router
+)
+app.include_router(
+    delivery_earnings_router
 )
 # ==========================
 # Health Check
