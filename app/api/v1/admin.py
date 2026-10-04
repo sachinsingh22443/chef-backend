@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta
 from uuid import UUID as UUIDType
 from zoneinfo import ZoneInfo
+from sqlalchemy import func
 from app.services.delivery_assignment import run_delivery_assignment
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, Integer
 from sqlalchemy.orm import Session, aliased
 from app.models.tomorrow_special import TomorrowSpecial
 from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
@@ -4448,6 +4449,46 @@ def get_delivery_partners(
         "delivery_partners": result
     }
     
+    
+def generate_delivery_employee_id(db: Session) -> str:
+    """
+    Generate next delivery partner employee ID:
+    DP-0001
+    DP-0002
+    DP-0003
+    """
+
+    last_employee_id = (
+        db.query(DeliveryPartnerProfile.employee_id)
+        .filter(
+            DeliveryPartnerProfile.employee_id.isnot(None),
+            DeliveryPartnerProfile.employee_id.like("DP-%"),
+        )
+        .order_by(
+            func.cast(
+                func.substring(
+                    DeliveryPartnerProfile.employee_id,
+                    4,
+                ),
+                Integer,
+            ).desc()
+        )
+        .first()
+    )
+
+    if not last_employee_id or not last_employee_id[0]:
+        return "DP-0001"
+
+    try:
+        last_number = int(last_employee_id[0].split("-")[1])
+    except (ValueError, IndexError):
+        last_number = 0
+
+    return f"DP-{last_number + 1:04d}"
+# =========================================================
+# 🚚 APPROVE DELIVERY PARTNER
+# =========================================================
+
 # =========================================================
 # 🚚 APPROVE DELIVERY PARTNER
 # =========================================================
@@ -4462,6 +4503,10 @@ def approve_delivery_partner(
         require_role(["admin"])
     ),
 ):
+
+    # =====================================================
+    # FIND USER
+    # =====================================================
 
     user = (
         db.query(User)
@@ -4479,6 +4524,10 @@ def approve_delivery_partner(
             detail="Delivery partner not found"
         )
 
+    # =====================================================
+    # FIND DELIVERY PARTNER PROFILE
+    # =====================================================
+
     profile = (
         db.query(DeliveryPartnerProfile)
         .filter(
@@ -4495,7 +4544,56 @@ def approve_delivery_partner(
         )
 
     # =====================================================
-    # APPROVE
+    # AUTO GENERATE EMPLOYEE ID
+    # =====================================================
+
+    # Employee ID sirf tab generate hoga
+    # jab pehle se Employee ID nahi hai.
+
+    if not profile.employee_id:
+
+        profile.employee_id = (
+            generate_delivery_employee_id(db)
+        )
+
+    # =====================================================
+    # AUTO JOINING DATE
+    # =====================================================
+
+    # Approval ki date ko joining date maana jayega.
+
+    if not profile.joining_date:
+
+        profile.joining_date = (
+            datetime.utcnow().date()
+        )
+
+    # =====================================================
+    # EMPLOYMENT TYPE
+    # =====================================================
+
+    if not profile.employment_type:
+
+        profile.employment_type = "full_time"
+
+    # =====================================================
+    # JOINING LOCATION
+    # =====================================================
+
+    if not profile.joining_location:
+
+        profile.joining_location = (
+            profile.city
+        )
+
+    # =====================================================
+    # EMPLOYMENT STATUS
+    # =====================================================
+
+    profile.employment_status = "active"
+
+    # =====================================================
+    # APPROVE USER
     # =====================================================
 
     user.application_status = "approved"
@@ -4504,20 +4602,44 @@ def approve_delivery_partner(
 
     user.rejection_reason = None
 
+    # =====================================================
+    # APPROVE PROFILE
+    # =====================================================
+
     profile.application_status = "approved"
 
     profile.rejection_reason = None
+
+    # =====================================================
+    # DELIVERY STATUS
+    # =====================================================
+
+    # Approval ke baad driver automatically
+    # online/available nahi hoga.
 
     profile.is_online = False
 
     profile.is_available = False
 
+    # =====================================================
+    # UPDATED TIME
+    # =====================================================
+
     profile.updated_at = datetime.utcnow()
+
+    # =====================================================
+    # SAVE
+    # =====================================================
 
     db.commit()
 
     db.refresh(user)
+
     db.refresh(profile)
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
     return {
 
@@ -4525,21 +4647,52 @@ def approve_delivery_partner(
             "Delivery partner approved successfully"
         ),
 
-        "user_id": str(user.id),
+        "user_id": str(
+            user.id
+        ),
 
-        "profile_id": str(profile.id),
+        "profile_id": str(
+            profile.id
+        ),
 
         "application_status": (
             user.application_status
         ),
 
-        "is_active": user.is_active,
+        "is_active": (
+            user.is_active
+        ),
 
-        "is_online": profile.is_online,
+        "employee_id": (
+            profile.employee_id
+        ),
 
-        "is_available": profile.is_available
+        "joining_date": (
+            profile.joining_date.isoformat()
+            if profile.joining_date
+            else None
+        ),
+
+        "employment_type": (
+            profile.employment_type
+        ),
+
+        "joining_location": (
+            profile.joining_location
+        ),
+
+        "employment_status": (
+            profile.employment_status
+        ),
+
+        "is_online": (
+            profile.is_online
+        ),
+
+        "is_available": (
+            profile.is_available
+        ),
     }
-    
 # =========================================================
 # 🚚 REJECT DELIVERY PARTNER
 # =========================================================
