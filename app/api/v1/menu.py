@@ -1177,7 +1177,7 @@ def get_nearby_chefs(
             profile.longitude,
         )
 
-        if distance > 50:
+        if distance > 5:
             continue
 
         menus = menu_map.get(chef.id, [])
