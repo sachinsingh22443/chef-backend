@@ -1748,8 +1748,8 @@ async def create_order(
                             else None
                         ),
 
-                        meal_type="special",
-                        menu_date=special.special_date,
+                        meal_type=meal_type,
+                        menu_date=target_date,
                     )
                 )
 
