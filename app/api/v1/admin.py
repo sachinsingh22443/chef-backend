@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session, aliased
 from app.models.tomorrow_special import TomorrowSpecial
 from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
 from app.models.subscription_meal_schedule import SubscriptionMealSchedule
-
+from app.models.refresh_token import RefreshToken
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    verify_refresh_token,
+    hash_refresh_token,
+    REFRESH_TOKEN_EXPIRE_DAYS,
+)
 from app.models.user import User
 from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models.order import Order
@@ -346,6 +353,25 @@ def admin_login(
             "role": user.role,
         }
     )
+    
+    # =====================================================
+    # SAVE REFRESH TOKEN IN DATABASE
+    # =====================================================
+
+    refresh_token_record = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(refresh_token),
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(
+            days=REFRESH_TOKEN_EXPIRE_DAYS
+        )
+        ),
+        is_revoked=False,
+    )
+
+    db.add(refresh_token_record)
+    db.commit()
 
     # =====================================================
     # 15. CREATE REFRESH TOKEN
