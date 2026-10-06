@@ -347,6 +347,10 @@ def admin_login(
     # 14. CREATE ACCESS TOKEN
     # =====================================================
 
+    # =====================================================
+    # 14. CREATE ACCESS TOKEN
+    # =====================================================
+
     access_token = create_access_token(
         {
             "sub": str(user.id),
@@ -355,34 +359,34 @@ def admin_login(
     )
     
     # =====================================================
-    # SAVE REFRESH TOKEN IN DATABASE
-    # =====================================================
-
-    refresh_token_record = RefreshToken(
-        user_id=user.id,
-        token_hash=hash_refresh_token(refresh_token),
-        expires_at=(
-            datetime.utcnow()
-            + timedelta(
-            days=REFRESH_TOKEN_EXPIRE_DAYS
-        )
-        ),
-        is_revoked=False,
-    )
-
-    db.add(refresh_token_record)
-    db.commit()
-
-    # =====================================================
     # 15. CREATE REFRESH TOKEN
     # =====================================================
-
+    
     refresh_token = create_refresh_token(
         {
             "sub": str(user.id),
             "role": user.role,
         }
     )
+    
+    # =====================================================
+    # 16. SAVE REFRESH TOKEN IN DATABASE
+    # =====================================================
+    
+    refresh_token_record = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(refresh_token),
+        expires_at=(
+            datetime.utcnow()
+            + timedelta(
+                days=REFRESH_TOKEN_EXPIRE_DAYS
+            )
+        ),
+        is_revoked=False,
+    )
+    
+    db.add(refresh_token_record)
+    db.commit()
 
     # =====================================================
     # 16. SUCCESS
@@ -2903,7 +2907,18 @@ def admin_orders(
             "phone, chef name"
         ),
     ),
+
+    start_date: str | None = Query(
+        None,
+        description="Start date in YYYY-MM-DD format",
+    ),
+    
+    end_date: str | None = Query(
+        None,
+        description="End date in YYYY-MM-DD format",
+    ),
 ):
+
     # =====================================================
     # ALIASES
     #
@@ -3015,8 +3030,71 @@ def admin_orders(
     # =====================================================
     # TOTAL MATCHING ORDERS
     # =====================================================
+    # =====================================================
+    # DATE FILTER
+    # =====================================================
 
+    india_tz = ZoneInfo("Asia/Kolkata")
+    utc_tz = ZoneInfo("UTC")
+    
+    try:
+    
+        if start_date:
+            start_date_india = datetime.strptime(
+                start_date,
+                "%Y-%m-%d"
+            ).replace(
+                tzinfo=india_tz
+            )
+    
+            start_date_utc = (
+                start_date_india
+                .astimezone(utc_tz)
+                .replace(tzinfo=None)
+            )
+    
+            query = query.filter(
+                Order.created_at >= start_date_utc
+            )
+    
+        if end_date:
+            # End date ko exclusive rakhenge.
+            # Example:
+            # end_date = 2026-10-06
+            # means till 06 Oct 11:59:59 PM IST
+    
+            end_date_india = (
+                datetime.strptime(
+                    end_date,
+                    "%Y-%m-%d"
+                )
+                + timedelta(days=1)
+            ).replace(
+                tzinfo=india_tz
+            )
+    
+            end_date_utc = (
+                end_date_india
+                .astimezone(utc_tz)
+                .replace(tzinfo=None)
+            )
+    
+            query = query.filter(
+                Order.created_at < end_date_utc
+            )
+    
+    except ValueError:
+    
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid date format. "
+                "Use YYYY-MM-DD"
+            ),
+        )
     total = query.count()
+    
+    
 
     # =====================================================
     # STATUS SUMMARY
@@ -3024,11 +3102,23 @@ def admin_orders(
     # This summary is for ALL orders, not just current page.
     # =====================================================
 
-    status_rows = (
-        db.query(
-            Order.status,
-            func.count(Order.id),
+    status_query = db.query(
+        Order.status,
+        func.count(Order.id),
+    )
+
+    if start_date:
+        status_query = status_query.filter(
+            Order.created_at >= start_date_utc
         )
+    
+    if end_date:
+        status_query = status_query.filter(
+            Order.created_at < end_date_utc
+        )
+    
+    status_rows = (
+        status_query
         .group_by(Order.status)
         .all()
     )
