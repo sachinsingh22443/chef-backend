@@ -3911,7 +3911,18 @@ def admin_tomorrow_special_orders(
         None,
         description="pending, preparing, out_for_delivery, delivered, cancelled",
     ),
+
+    start_date: str | None = Query(
+        None,
+        description="Start date in YYYY-MM-DD format",
+    ),
+
+    end_date: str | None = Query(
+        None,
+        description="End date in YYYY-MM-DD format",
+    ),
 ):
+
     # =====================================================
     # 👥 USER ALIASES
     # =====================================================
@@ -3958,9 +3969,11 @@ def admin_tomorrow_special_orders(
     # =====================================================
 
     if search:
+
         search_value = search.strip()
 
         if search_value:
+
             pattern = f"%{search_value}%"
 
             query = query.filter(
@@ -3985,6 +3998,7 @@ def admin_tomorrow_special_orders(
     # =====================================================
 
     if status:
+
         normalized_status = status.strip().lower()
 
         if normalized_status == "completed":
@@ -3999,6 +4013,7 @@ def admin_tomorrow_special_orders(
         }
 
         if normalized_status not in allowed_statuses:
+
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -4010,6 +4025,96 @@ def admin_tomorrow_special_orders(
 
         query = query.filter(
             Order.status == normalized_status
+        )
+
+    # =====================================================
+    # 📅 DATE FILTER
+    # =====================================================
+
+    india_tz = ZoneInfo("Asia/Kolkata")
+    utc_tz = ZoneInfo("UTC")
+
+    # Tomorrow Special ka displayed created_at:
+    #
+    # 1. Agar linked Order hai -> Order.created_at
+    # 2. Agar Order nahi hai -> TomorrowSpecialPreOrder.created_at
+    #
+    # Isliye date filtering ke liye COALESCE use kar rahe hain.
+
+    order_created_column = func.coalesce(
+        Order.created_at,
+        TomorrowSpecialPreOrder.created_at,
+    )
+
+    try:
+
+        # -------------------------------------------------
+        # START DATE
+        # -------------------------------------------------
+
+        if start_date:
+
+            start_date_india = datetime.strptime(
+                start_date,
+                "%Y-%m-%d",
+            ).replace(
+                tzinfo=india_tz
+            )
+
+            start_date_utc = (
+                start_date_india
+                .astimezone(utc_tz)
+                .replace(tzinfo=None)
+            )
+
+            query = query.filter(
+                order_created_column >= start_date_utc
+            )
+
+        # -------------------------------------------------
+        # END DATE
+        # -------------------------------------------------
+
+        if end_date:
+
+            # End date ko complete day include karna hai.
+            #
+            # Example:
+            # end_date = 2026-10-06
+            #
+            # Filter:
+            # created_at < 2026-10-07 00:00 IST
+            #
+            # Isse 6 October ka pura din include hoga.
+
+            end_date_india = (
+                datetime.strptime(
+                    end_date,
+                    "%Y-%m-%d",
+                )
+                + timedelta(days=1)
+            ).replace(
+                tzinfo=india_tz
+            )
+
+            end_date_utc = (
+                end_date_india
+                .astimezone(utc_tz)
+                .replace(tzinfo=None)
+            )
+
+            query = query.filter(
+                order_created_column < end_date_utc
+            )
+
+    except ValueError:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid date format. "
+                "Use YYYY-MM-DD"
+            ),
         )
 
     # =====================================================
@@ -4090,6 +4195,7 @@ def admin_tomorrow_special_orders(
         if created_at:
 
             if created_at.tzinfo is None:
+
                 created_at_ist = (
                     created_at
                     .replace(
@@ -4099,6 +4205,7 @@ def admin_tomorrow_special_orders(
                 )
 
             else:
+
                 created_at_ist = (
                     created_at
                     .astimezone(india_tz)
@@ -4109,6 +4216,7 @@ def admin_tomorrow_special_orders(
         # =================================================
 
         customer_data = {
+
             "id": (
                 str(customer.id)
                 if customer
@@ -4151,6 +4259,7 @@ def admin_tomorrow_special_orders(
         # =================================================
 
         chef_data = {
+
             "id": (
                 str(chef.id)
                 if chef
@@ -4185,6 +4294,7 @@ def admin_tomorrow_special_orders(
         # =================================================
 
         special_data = {
+
             "id": str(
                 special.id
             ),
@@ -4249,6 +4359,7 @@ def admin_tomorrow_special_orders(
         # =================================================
 
         order_data = {
+
             "id": (
                 str(order.id)
                 if order
@@ -4334,6 +4445,7 @@ def admin_tomorrow_special_orders(
 
         orders.append(
             {
+
                 "pre_order_id": str(
                     pre_order.id
                 ),
@@ -4388,24 +4500,34 @@ def admin_tomorrow_special_orders(
     # =====================================================
 
     return {
+
         "success": True,
 
         "pagination": {
+
             "page": page,
+
             "limit": limit,
+
             "total": total,
+
             "total_pages": total_pages,
+
             "has_next": (
                 page < total_pages
             ),
+
             "has_previous": (
                 page > 1
             ),
         },
 
         "summary": {
+
             "total_orders": total,
+
             "total_plates": total_plates,
+
             "total_amount": round(
                 total_amount,
                 2,
@@ -4414,7 +4536,6 @@ def admin_tomorrow_special_orders(
 
         "orders": orders,
     }
-    
     
 # =========================================================
 # 🚚 DELIVERY PARTNERS - PENDING APPLICATIONS
