@@ -35,6 +35,10 @@ from app.models import (
     subscription_plan_menu_cycle,
     delivery_order,
     delivery_batch,
+    delivery_order_event,
+    delivery_order_issue,
+    delivery_cod_collection,
+    delivery_proof,
 )
 
 from app.api.v1 import (

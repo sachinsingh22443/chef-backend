@@ -45,6 +45,11 @@ from app.models import (
 )
 from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models.delivery_batch_pickup import DeliveryBatchPickup
+from app.models.delivery_order_event import DeliveryOrderEvent
+from app.models.delivery_order_issue import DeliveryOrderIssue
+from app.models.delivery_cod_collection import DeliveryCODCollection
+from app.models.delivery_proof import DeliveryProof
+
 # Agar cart ya address ke alag models hain jo main.py me import nahi the, unhe bhi safe side import kar lete hain:
 try:
     from app.models import address, cart, review, tomorrow_special

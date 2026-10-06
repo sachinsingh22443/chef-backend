@@ -13,6 +13,11 @@ from app.models.delivery_order import DeliveryOrder
 from app.models.order import Order
 from app.models.delivery_batch import DeliveryBatch
 from app.models.delivery_batch_pickup import DeliveryBatchPickup
+from app.models.delivery_order_event import DeliveryOrderEvent
+from app.models.delivery_order_issue import DeliveryOrderIssue
+from app.models.delivery_cod_collection import DeliveryCODCollection
+from app.models.delivery_proof import DeliveryProof
+from app.models.order_item import OrderItem
 
 
 router = APIRouter(

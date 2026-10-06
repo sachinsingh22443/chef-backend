@@ -1132,7 +1132,10 @@ def get_nearby_chefs(
     chefs = (
         db.query(User)
         .options(selectinload(User.chef_profile))
-        .filter(User.role == "chef")
+        .filter(
+            User.role == "chef",
+            User.is_active == True,
+        )
         .all()
     )
 
