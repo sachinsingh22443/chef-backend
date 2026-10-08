@@ -708,7 +708,7 @@ def get_chef_7_day_menu(
     cutoff_times = {
         "breakfast": (9, 0),
         "lunch": (12, 0),
-        "dinner": (7, 0),
+        "dinner": (19, 0),
     }
 
     for offset in range(CUSTOMER_MENU_DAYS):
