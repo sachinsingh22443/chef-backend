@@ -2030,6 +2030,8 @@ def sync_chef_pickup_to_delivery_orders(
                     "assigned",
                     "ready",
                     "out_for_delivery",
+                    "delivered",
+                    "cancelled",
                 ]
             ),
         )
