@@ -386,11 +386,11 @@ def get_top_dishes(
         Menu.image_urls,
         func.sum(OrderItem.quantity).label("total_sold")
     )\
-    .join(OrderItem, OrderItem.menu_id == Menu.id)\
-    .group_by(Menu.id)\
-    .order_by(func.sum(OrderItem.quantity).desc())\
-    .limit(limit)\
-    .all()
+        .join(OrderItem, OrderItem.menu_id == Menu.id)\
+        .group_by(Menu.id)\
+        .order_by(func.sum(OrderItem.quantity).desc())\
+        .limit(limit)\
+        .all()
 
     return results
 
@@ -707,8 +707,8 @@ def get_chef_7_day_menu(
 
     cutoff_times = {
         "breakfast": (9, 0),
-        "lunch": (13, 0),
-        "dinner": (20, 0),
+        "lunch": (12, 0),
+        "dinner": (7, 0),
     }
 
     for offset in range(CUSTOMER_MENU_DAYS):
