@@ -612,20 +612,12 @@ def get_my_delivery_orders(
 # =========================================================
 
 
-@router.get(
-    "/orders/{delivery_order_id}"
-)
+@router.get("/orders/{delivery_order_id}")
 def get_my_delivery_order_detail(
-
     delivery_order_id: str,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
-
     profile = get_delivery_partner_profile(
         current_user,
         db,
@@ -636,36 +628,27 @@ def get_my_delivery_order_detail(
     # =====================================================
 
     try:
-
-        delivery_order_uuid = UUID(
-            delivery_order_id
-        )
-
+        delivery_order_uuid = UUID(delivery_order_id)
     except ValueError:
-
         raise HTTPException(
             status_code=400,
             detail="Invalid delivery order ID",
         )
 
     # =====================================================
-    # FIND ASSIGNED DELIVERY ORDER
+    # GET DELIVERY ORDER
     # =====================================================
 
     delivery_order = (
         db.query(DeliveryOrder)
         .filter(
-            DeliveryOrder.id
-            == delivery_order_uuid,
-
-            DeliveryOrder.delivery_partner_id
-            == current_user.id,
+            DeliveryOrder.id == delivery_order_uuid,
+            DeliveryOrder.delivery_partner_id == current_user.id,
         )
         .first()
     )
 
     if not delivery_order:
-
         raise HTTPException(
             status_code=404,
             detail=(
@@ -681,56 +664,286 @@ def get_my_delivery_order_detail(
     order = (
         db.query(Order)
         .filter(
-            Order.id
-            == delivery_order.order_id
+            Order.id == delivery_order.order_id
         )
         .first()
     )
 
     if not order:
-
         raise HTTPException(
             status_code=404,
             detail="Main order not found",
         )
 
     # =====================================================
-    # RESPONSE
+    # GET ORDER ITEMS
+    # =====================================================
+
+    order_items = (
+        db.query(OrderItem)
+        .filter(
+            OrderItem.order_id == order.id
+        )
+        .order_by(OrderItem.menu_date.asc().nullslast())
+        .all()
+    )
+
+    items = []
+
+    for item in order_items:
+        items.append(
+            {
+                "id": str(item.id),
+                "menu_id": (
+                    str(item.menu_id)
+                    if item.menu_id
+                    else None
+                ),
+                "special_id": (
+                    str(item.special_id)
+                    if item.special_id
+                    else None
+                ),
+                "name": item.item_name,
+                "quantity": item.quantity,
+                "price": item.price,
+                "image": item.item_image,
+                "meal_type": item.meal_type,
+                "menu_date": (
+                    item.menu_date.isoformat()
+                    if item.menu_date
+                    else None
+                ),
+                "total": (
+                    float(item.price or 0)
+                    * int(item.quantity or 0)
+                ),
+            }
+        )
+
+    # =====================================================
+    # GET DELIVERY EVENTS / TIMELINE
+    # =====================================================
+
+    events = (
+        db.query(DeliveryOrderEvent)
+        .filter(
+            DeliveryOrderEvent.delivery_order_id
+            == delivery_order.id
+        )
+        .order_by(
+            DeliveryOrderEvent.created_at.asc()
+        )
+        .all()
+    )
+
+    timeline = []
+
+    for event in events:
+        timeline.append(
+            {
+                "id": str(event.id),
+                "event_type": event.event_type,
+                "status": event.status,
+                "description": event.description,
+                "latitude": event.latitude,
+                "longitude": event.longitude,
+                "created_by": (
+                    str(event.created_by)
+                    if event.created_by
+                    else None
+                ),
+                "created_at": (
+                    event.created_at.isoformat()
+                    if event.created_at
+                    else None
+                ),
+            }
+        )
+
+    # =====================================================
+    # GET COD COLLECTION
+    # =====================================================
+
+    cod_collection = (
+        db.query(DeliveryCODCollection)
+        .filter(
+            DeliveryCODCollection.delivery_order_id
+            == delivery_order.id
+        )
+        .first()
+    )
+
+    cod_data = None
+
+    if cod_collection:
+        cod_data = {
+            "id": str(cod_collection.id),
+            "order_amount": float(
+                cod_collection.order_amount or 0
+            ),
+            "collected_amount": float(
+                cod_collection.collected_amount or 0
+            ),
+            "payment_status": (
+                cod_collection.payment_status
+            ),
+            "collection_method": (
+                cod_collection.collection_method
+            ),
+            "notes": cod_collection.notes,
+            "collected_at": (
+                cod_collection.collected_at.isoformat()
+                if cod_collection.collected_at
+                else None
+            ),
+            "created_at": (
+                cod_collection.created_at.isoformat()
+                if cod_collection.created_at
+                else None
+            ),
+        }
+
+    # =====================================================
+    # GET DELIVERY PROOF
+    # =====================================================
+
+    delivery_proof = (
+        db.query(DeliveryProof)
+        .filter(
+            DeliveryProof.delivery_order_id
+            == delivery_order.id
+        )
+        .first()
+    )
+
+    proof_data = None
+
+    if delivery_proof:
+        proof_data = {
+            "id": str(delivery_proof.id),
+            "verification_type": (
+                delivery_proof.verification_type
+            ),
+            "otp_verified": (
+                delivery_proof.otp_verified
+            ),
+            "photo_url": delivery_proof.photo_url,
+            "notes": delivery_proof.notes,
+            "verified_at": (
+                delivery_proof.verified_at.isoformat()
+                if delivery_proof.verified_at
+                else None
+            ),
+            "created_at": (
+                delivery_proof.created_at.isoformat()
+                if delivery_proof.created_at
+                else None
+            ),
+        }
+
+    # =====================================================
+    # GET DELIVERY ISSUES
+    # =====================================================
+
+    issues = (
+        db.query(DeliveryOrderIssue)
+        .filter(
+            DeliveryOrderIssue.delivery_order_id
+            == delivery_order.id
+        )
+        .order_by(
+            DeliveryOrderIssue.created_at.desc()
+        )
+        .all()
+    )
+
+    issue_data = []
+
+    for issue in issues:
+        issue_data.append(
+            {
+                "id": str(issue.id),
+                "issue_type": issue.issue_type,
+                "reason": issue.reason,
+                "notes": issue.notes,
+                "status": issue.status,
+                "reported_by": (
+                    str(issue.reported_by)
+                    if issue.reported_by
+                    else None
+                ),
+                "resolved_by": (
+                    str(issue.resolved_by)
+                    if issue.resolved_by
+                    else None
+                ),
+                "created_at": (
+                    issue.created_at.isoformat()
+                    if issue.created_at
+                    else None
+                ),
+                "resolved_at": (
+                    issue.resolved_at.isoformat()
+                    if issue.resolved_at
+                    else None
+                ),
+            }
+        )
+
+    # =====================================================
+    # PAYMENT INFORMATION
+    # =====================================================
+
+    payment_data = {
+        "method": order.payment_method,
+        "status": order.payment_status,
+        "payment_id": order.payment_id,
+        "razorpay_order_id": order.razorpay_order_id,
+        "total_price": float(
+            order.total_price or 0
+        ),
+        "cod_confirmed": bool(
+            order.cod_confirmed
+        ),
+        "refund_status": order.refund_status,
+        "refund_amount": (
+            float(order.refund_amount)
+            if order.refund_amount is not None
+            else None
+        ),
+        "refund_date": (
+            order.refund_date.isoformat()
+            if order.refund_date
+            else None
+        ),
+    }
+
+    # =====================================================
+    # DELIVERY PARTNER
+    # =====================================================
+
+    delivery_partner_data = {
+        "user_id": str(current_user.id),
+        "profile_id": str(profile.id),
+        "name": current_user.name,
+        "phone": current_user.phone,
+        "is_online": profile.is_online,
+        "is_available": profile.is_available,
+        "current_latitude": profile.current_latitude,
+        "current_longitude": profile.current_longitude,
+    }
+
+    # =====================================================
+    # FINAL RESPONSE
     # =====================================================
 
     return {
-
         "success": True,
 
-        "delivery_partner": {
-
-            "user_id": str(
-                current_user.id
-            ),
-
-            "profile_id": str(
-                profile.id
-            ),
-
-            "is_online": (
-                profile.is_online
-            ),
-
-            "is_available": (
-                profile.is_available
-            ),
-
-            "current_latitude": (
-                profile.current_latitude
-            ),
-
-            "current_longitude": (
-                profile.current_longitude
-            ),
-        },
+        "delivery_partner": delivery_partner_data,
 
         "order": {
-
             # =================================================
             # DELIVERY
             # =================================================
@@ -747,12 +960,16 @@ def get_my_delivery_order_detail(
                 delivery_order.delivery_status
             ),
 
-            "order_status": (
-                order.status
-            ),
+            "order_status": order.status,
 
             "sequence_no": (
                 delivery_order.sequence_no
+            ),
+
+            "batch_id": (
+                str(delivery_order.batch_id)
+                if delivery_order.batch_id
+                else None
             ),
 
             # =================================================
@@ -760,15 +977,12 @@ def get_my_delivery_order_detail(
             # =================================================
 
             "customer": {
-
                 "id": str(
                     delivery_order.customer_id
                 ),
-
                 "name": (
                     delivery_order.customer_name
                 ),
-
                 "phone": (
                     delivery_order.customer_phone
                 ),
@@ -779,15 +993,12 @@ def get_my_delivery_order_detail(
             # =================================================
 
             "address": {
-
                 "full_address": (
                     delivery_order.address_snapshot
                 ),
-
                 "latitude": (
                     delivery_order.latitude
                 ),
-
                 "longitude": (
                     delivery_order.longitude
                 ),
@@ -806,18 +1017,72 @@ def get_my_delivery_order_detail(
             ),
 
             # =================================================
-            # BATCH
+            # ORDER INFORMATION
             # =================================================
 
-            "batch_id": (
-                str(delivery_order.batch_id)
-                if delivery_order.batch_id
+            "customer_name": order.customer_name,
+            "customer_phone": order.phone,
+            "is_subscription": bool(
+                order.is_subscription
+            ),
+
+            "chef_id": (
+                str(order.chef_id)
+                if order.chef_id
+                else None
+            ),
+
+            "order_created_at": (
+                order.created_at.isoformat()
+                if order.created_at
                 else None
             ),
 
             # =================================================
-            # TIMESTAMPS
+            # ITEMS
             # =================================================
+
+            "items": items,
+
+            # =================================================
+            # PAYMENT
+            # =================================================
+
+            "payment": payment_data,
+
+            # =================================================
+            # COD COLLECTION
+            # =================================================
+
+            "cod_collection": cod_data,
+
+            # =================================================
+            # DELIVERY PROOF
+            # =================================================
+
+            "delivery_proof": proof_data,
+
+            # =================================================
+            # TIMELINE / EVENTS
+            # =================================================
+
+            "timeline": timeline,
+
+            # =================================================
+            # ISSUES
+            # =================================================
+
+            "issues": issue_data,
+
+            # =================================================
+            # DELIVERY TIMESTAMPS
+            # =================================================
+
+            "created_at": (
+                delivery_order.created_at.isoformat()
+                if delivery_order.created_at
+                else None
+            ),
 
             "assigned_at": (
                 delivery_order.assigned_at.isoformat()
@@ -834,12 +1099,6 @@ def get_my_delivery_order_detail(
             "delivered_at": (
                 delivery_order.delivered_at.isoformat()
                 if delivery_order.delivered_at
-                else None
-            ),
-
-            "created_at": (
-                delivery_order.created_at.isoformat()
-                if delivery_order.created_at
                 else None
             ),
         },
