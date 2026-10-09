@@ -5,7 +5,7 @@
 from datetime import datetime, date
 from math import radians, sin, cos, sqrt, atan2
 from collections import defaultdict
-
+from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models.user import User
@@ -16,6 +16,7 @@ from app.models.delivery_order import DeliveryOrder
 from app.models.delivery_batch import DeliveryBatch
 from app.models.order import Order
 from app.models.order_item import OrderItem
+from app.models.notification import Notification
 
 
 # ============================================================
@@ -1767,12 +1768,58 @@ def run_delivery_assignment(
 
         if not drivers:
             break
+    
+    # --------------------------------------------------------
+    # CREATE ONE NOTIFICATION PER AFFECTED DRIVER + BATCH
+    # --------------------------------------------------------
+
+    if assignment_results:
+        notification_groups = defaultdict(list)
+
+        for assignment in assignment_results:
+            key = (
+                assignment["delivery_partner_id"],
+                assignment["batch_id"],
+            )
+            notification_groups[key].append(assignment)
+
+        for (driver_id, batch_id), items in notification_groups.items():
+            total_new_orders = len(items)
+            total_new_tiffins = sum(
+                int(item.get("tiffins") or 0)
+                for item in items
+            )
+
+            meal_type = items[0].get("meal_type") or "mixed"
+            delivery_date = items[0].get("delivery_date") or ""
+
+            notif = Notification(
+                user_id=UUID(driver_id),
+                type="delivery_assigned",
+                title="New Delivery Assigned",
+                message=(
+                    f"{meal_type.title()} delivery assigned: "
+                    f"{total_new_orders} new order(s), "
+                    f"{total_new_tiffins} tiffins "
+                    f"for {delivery_date}."
+                ),
+                is_read=False,
+                action_url=None,
+                created_at=datetime.utcnow(),
+            )
+
+            db.add(notif)
+
+    # --------------------------------------------------------
+    # COMMIT ALL ASSIGNMENTS + NOTIFICATIONS TOGETHER
+    # --------------------------------------------------------
+
+    db.commit()
 
     # --------------------------------------------------------
     # 5. COMMIT ALL ASSIGNMENTS
     # --------------------------------------------------------
 
-    db.commit()
 
     # --------------------------------------------------------
     # 6. FINAL UNASSIGNED COUNT
