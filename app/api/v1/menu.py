@@ -706,7 +706,7 @@ def get_chef_7_day_menu(
     days = []
 
     cutoff_times = {
-        "breakfast": (9, 0),
+        "breakfast": (7, 0),
         "lunch": (12, 0),
         "dinner": (19, 0),
     }
