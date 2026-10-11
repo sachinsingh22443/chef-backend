@@ -26,6 +26,7 @@ from app.api.v1.delivery_earnings import router as delivery_earnings_router
 from app.api.v1.delivery_profile import (
     router as delivery_profile_router
 )
+from app.models import fcm_device_token
 from app.models import (
     user,
     menu,

@@ -7,6 +7,17 @@ from datetime import datetime
 from app.api.deps import get_db, get_current_user
 from app.models.notification import Notification
 
+
+from fastapi import Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_db
+from app.models.fcm_device_token import FCMDeviceToken
+from app.schemas.fcm_device_token import FCMDeviceTokenRequest
+from app.core.firebase_notifications import send_push_notification
+
+
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 
@@ -103,3 +114,76 @@ def create_notification(
     db.commit()
 
     return {"message": "notification created"}
+
+
+
+
+@router.post("/register-device")
+def register_fcm_device(
+    payload: FCMDeviceTokenRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    device = (
+        db.query(FCMDeviceToken)
+        .filter(FCMDeviceToken.token == payload.token)
+        .first()
+    )
+
+    if device:
+        device.user_id = current_user.id
+    else:
+        device = FCMDeviceToken(
+            user_id=current_user.id,
+            token=payload.token,
+        )
+        db.add(device)
+
+    db.commit()
+
+    return {"success": True, "message": "Device token registered"}
+
+
+@router.post("/test-push")
+def test_fcm_push(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    devices = (
+        db.query(FCMDeviceToken)
+        .filter(FCMDeviceToken.user_id == current_user.id)
+        .all()
+    )
+
+    if not devices:
+        raise HTTPException(
+            status_code=404,
+            detail="No FCM device token registered for this user",
+        )
+
+    results = []
+
+    for device in devices:
+        try:
+            message_id = send_push_notification(
+                token=device.token,
+                title="Chef App Test",
+                message="Push notification successfully received!",
+            )
+            results.append({
+                "success": True,
+                "message_id": message_id,
+            })
+        except Exception:
+            results.append({
+                "success": False,
+                "message": "Push failed for this device",
+            })
+
+    if not any(result["success"] for result in results):
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "FCM could not deliver the test push", "results": results},
+        )
+
+    return {"success": True, "results": results}
