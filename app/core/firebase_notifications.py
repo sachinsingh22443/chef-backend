@@ -19,7 +19,7 @@ def send_push_notification(
     android_config = messaging.AndroidConfig(
         priority="high",
         notification=messaging.AndroidNotification(
-            channel_id="chef_notifications",
+            channel_id="chef_order_alerts_v2",
             sound="default",
         ),
     )
