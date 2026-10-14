@@ -508,7 +508,7 @@ def admin_dashboard(
         .filter(
             Order.created_at >= today_start_utc,
             Order.created_at < tomorrow_start_utc,
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .scalar()
         or 0
@@ -593,12 +593,11 @@ def admin_dashboard(
         .filter(
             Order.created_at >= today_start_utc,
             Order.created_at < tomorrow_start_utc,
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .scalar()
         or 0
     )
-
     # =====================================================
     # TOTAL REVENUE
     # =====================================================
@@ -611,7 +610,7 @@ def admin_dashboard(
             )
         )
         .filter(
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .scalar()
         or 0
@@ -695,7 +694,7 @@ def admin_dashboard(
         .filter(
             Order.created_at >= today_start_utc,
             Order.created_at < tomorrow_start_utc,
-            Order.status != "cancelled",
+            Order.status == "delivered",
             func.lower(
                 func.coalesce(
                     Order.payment_method,
@@ -1359,7 +1358,7 @@ def admin_analytics(
         .filter(
             Order.created_at >= period_start_utc,
             Order.created_at < period_end_utc,
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
     )
 
@@ -1383,7 +1382,7 @@ def admin_analytics(
             Order.created_at < (
                 previous_period_end_utc
             ),
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .scalar()
         or 0
@@ -1405,7 +1404,7 @@ def admin_analytics(
         .filter(
             Order.created_at >= period_start_utc,
             Order.created_at < period_end_utc,
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .scalar()
         or 0
@@ -1435,7 +1434,7 @@ def admin_analytics(
             Order.created_at < (
                 previous_period_end_utc
             ),
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .scalar()
         or 0
@@ -1669,7 +1668,7 @@ def admin_analytics(
         .filter(
             Order.created_at >= period_start_utc,
             Order.created_at < period_end_utc,
-            Order.status != "cancelled",
+            Order.status == "delivered",
         )
         .group_by(
             Order.payment_method
@@ -1860,7 +1859,7 @@ def admin_analytics(
                 Order.created_at < (
                     period_end_utc
                 ),
-                Order.status != "cancelled",
+                Order.status == "delivered",
             )
             .scalar()
             or 0
@@ -1887,7 +1886,7 @@ def admin_analytics(
                 Order.created_at < (
                     period_end_utc
                 ),
-                Order.status != "cancelled",
+                Order.status == "delivered",
             )
             .scalar()
             or 0
@@ -1978,7 +1977,7 @@ def admin_analytics(
                 Order.created_at < (
                     period_end_utc
                 ),
-                Order.status != "cancelled",
+                Order.status == "delivered",
             )
             .scalar()
             or 0
