@@ -823,6 +823,125 @@ class RefreshTokenRequest(BaseModel):
 
 
 # =========================================================
+# DELIVERY PARTNER - FORGOT PASSWORD
+# =========================================================
+
+class DeliveryForgotPasswordSchema(BaseModel):
+    phone: str
+
+
+class DeliveryResetPasswordSchema(BaseModel):
+    phone: str
+    otp: str
+    new_password: str
+
+
+@router.post("/delivery/forgot-password")
+def delivery_forgot_password(
+    data: DeliveryForgotPasswordSchema,
+    db: Session = Depends(get_db),
+):
+    phone = data.phone.strip()
+
+    user = (
+        db.query(User)
+        .filter(
+            User.phone == phone,
+            User.role == "delivery_partner",
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="No delivery partner account found with this phone number",
+        )
+
+    if not user.is_active or user.application_status != "approved":
+        raise HTTPException(
+            status_code=403,
+            detail="Your delivery partner account is not active or approved",
+        )
+
+    result = send_otp(phone)
+
+    if result.get("type") != "success":
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to send OTP. Please try again.",
+        )
+
+    return {"message": "OTP sent successfully"}
+
+
+# =========================================================
+# DELIVERY PARTNER - RESET PASSWORD
+# =========================================================
+
+@router.post("/delivery/reset-password")
+def delivery_reset_password(
+    data: DeliveryResetPasswordSchema,
+    db: Session = Depends(get_db),
+):
+    phone = data.phone.strip()
+
+    if len(data.new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 6 characters",
+        )
+
+    user = (
+        db.query(User)
+        .filter(
+            User.phone == phone,
+            User.role == "delivery_partner",
+        )
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Delivery partner account not found",
+        )
+
+    if not user.is_active or user.application_status != "approved":
+        raise HTTPException(
+            status_code=403,
+            detail="Your delivery partner account is not active or approved",
+        )
+
+    otp_result = verify_otp(phone, data.otp)
+
+    if otp_result.get("type") != "success":
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OTP",
+        )
+
+    if verify_password(data.new_password, user.password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password cannot be the same as the old password",
+        )
+
+    try:
+        user.password = hash_password(data.new_password)
+        db.commit()
+
+        return {"message": "Password reset successfully"}
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to reset password. Please try again.",
+        )
+
+
+# =========================================================
 # REFRESH ACCESS TOKEN
 # =========================================================
 
