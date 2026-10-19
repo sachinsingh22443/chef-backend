@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import or_, func
 from app.core.cache import get_cache, set_cache
 import os
+from app.models.explore_product import ExploreProduct
 from app.models.tomorrow_special_pre_order import TomorrowSpecialPreOrder
 from app.core.cache import delete_cache
 from app.services.whatsapp import send_new_order_whatsapp
@@ -726,6 +727,7 @@ def reverse_single_tiffin_referral_reward(
 
     return True
 
+
 @router.get("/chef-orders")
 def get_chef_orders(
     db: Session = Depends(get_db),
@@ -735,9 +737,7 @@ def get_chef_orders(
         orders = (
             db.query(Order)
             .options(selectinload(Order.items))
-            .filter(
-                Order.chef_id == user.id
-            )
+            .filter(Order.chef_id == user.id)
             .order_by(Order.created_at.desc())
             .all()
         )
@@ -757,7 +757,6 @@ def get_chef_orders(
             items = []
 
             for item in order.items:
-
                 items.append({
                     "id": str(item.id) if item.id else None,
                     "name": item.item_name,
@@ -765,17 +764,30 @@ def get_chef_orders(
                     "price": float(item.price or 0),
                     "image": item.item_image,
 
-                    # 🔥 Tomorrow Special identification
+                    # Tomorrow Special identification
                     "special_id": (
                         str(item.special_id)
                         if item.special_id
                         else None
                     ),
 
+                    # Normal Menu identification
                     "menu_id": (
                         str(item.menu_id)
                         if item.menu_id
                         else None
+                    ),
+
+                    # Explore Product identification
+                    "product_id": (
+                        str(item.product_id)
+                        if getattr(item, "product_id", None)
+                        else None
+                    ),
+
+                    "is_explore_product": (
+                        getattr(item, "product_id", None)
+                        is not None
                     ),
 
                     "is_tomorrow_special": (
@@ -785,7 +797,6 @@ def get_chef_orders(
 
             data.append({
                 "id": str(order.id),
-
                 "status": order.status,
 
                 "total_price": float(
@@ -794,41 +805,44 @@ def get_chef_orders(
 
                 "created_at": order.created_at,
 
-                # Customer
+                # Customer details
                 "customer_name": order.customer_name,
                 "phone": order.phone,
                 "address": order.address,
 
-                # Payment
+                # Payment details
                 "payment_method": order.payment_method,
                 "payment_status": order.payment_status,
 
-                # 🔥 IMPORTANT
+                # COD confirmation
                 "cod_confirmed": bool(
                     order.cod_confirmed
                 ),
 
-                # 🔥 Tomorrow Special flag
+                # Order-level Tomorrow Special flag
                 "is_tomorrow_special": any(
                     item.special_id is not None
                     for item in order.items
                 ),
 
-                # Items
+                # Order items
                 "items": items,
             })
 
+        # Cancelled orders ko total_orders mein count nahi karna
+        total_orders = sum(
+            1 for order in data
+            if str(order["status"]).lower() != "cancelled"
+        )
+
         return {
-            "total_orders": len([
-                o for o in data
-                if o["status"] != "cancelled"
-            ]),
-            "orders": data
+            "total_orders": total_orders,
+            "orders": data,
         }
 
     except Exception as e:
         print(
-            "❌ CHEF ORDERS ERROR:",
+            "CHEF ORDERS ERROR:",
             repr(e)
         )
 
@@ -840,21 +854,20 @@ def get_chef_orders(
 # =========================
 # ✅ GET ALL ORDERS
 # =========================
+
 @router.get("/")
 def get_my_orders(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
     # =====================================================
-    # CACHE KEY
+    # CACHE KEY - v2 to avoid old cached response structure
     # =====================================================
-
-    cache_key = f"orders:v1:user:{user.id}"
+    cache_key = f"orders:v2:user:{user.id}"
 
     # =====================================================
     # CACHE HIT
     # =====================================================
-
     cached = get_cache(cache_key)
 
     if cached is not None:
@@ -863,55 +876,75 @@ def get_my_orders(
     # =====================================================
     # DATABASE
     # =====================================================
-
     orders = (
         db.query(Order)
-        .options(
-            selectinload(Order.items)
-        )
-        .filter(
-            Order.user_id == user.id
-        )
-        .order_by(
-            Order.created_at.desc()
-        )
+        .options(selectinload(Order.items))
+        .filter(Order.user_id == user.id)
+        .order_by(Order.created_at.desc())
         .all()
     )
 
     # =====================================================
     # RESPONSE
     # =====================================================
-
     result = []
 
     for order in orders:
+        order_items = []
+
+        for item in order.items:
+            product_id = getattr(item, "product_id", None)
+
+            order_items.append({
+                "id": str(item.id) if item.id else None,
+                "name": item.item_name,
+                "quantity": item.quantity,
+                "price": float(item.price or 0),
+                "image": item.item_image,
+
+                # Normal menu identification
+                "menu_id": (
+                    str(item.menu_id)
+                    if item.menu_id
+                    else None
+                ),
+
+                # Tomorrow Special identification
+                "special_id": (
+                    str(item.special_id)
+                    if item.special_id
+                    else None
+                ),
+
+                # Explore Product identification
+                "product_id": (
+                    str(product_id)
+                    if product_id
+                    else None
+                ),
+                "is_explore_product": product_id is not None,
+
+                # Tomorrow Special flag
+                "is_tomorrow_special": (
+                    item.special_id is not None
+                ),
+            })
 
         result.append({
             "id": str(order.id),
             "status": order.status,
-            "total_price": order.total_price,
+            "total_price": float(order.total_price or 0),
             "created_at": (
                 order.created_at.isoformat()
                 if order.created_at
                 else None
             ),
-
-            "items": [
-                {
-                    "id": str(item.id),
-                    "name": item.item_name,
-                    "quantity": item.quantity,
-                    "price": item.price,
-                    "image": item.item_image,
-                }
-                for item in order.items
-            ],
+            "items": order_items,
         })
 
     # =====================================================
     # CACHE
     # =====================================================
-
     set_cache(
         cache_key,
         result,
@@ -919,7 +952,7 @@ def get_my_orders(
     )
 
     return result
-    
+
 # =========================
 # 🍽️ CUSTOMER - MY SPECIAL HISTORY
 # =========================
@@ -1090,23 +1123,33 @@ def get_my_special_history(
 # =========================
 from uuid import UUID
 
+
+# =========================
+# ✅ GET SINGLE ORDER
+# =========================
+
 @router.get("/{order_id}")
 def get_order(
     order_id: str,
     db: Session = Depends(get_db),
     user=Depends(get_current_user)
 ):
-    # UUID validation
+    # =====================================================
+    # UUID VALIDATION
+    # =====================================================
     try:
         order_uuid = UUID(order_id)
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
         raise HTTPException(
             status_code=400,
             detail="Invalid order ID"
         )
 
-    # Customer apna order dekh sakta hai
-    # Chef apne assigned orders dekh sakta hai
+    # =====================================================
+    # FETCH ORDER
+    # Customer can view their own order
+    # Chef can view their assigned order
+    # =====================================================
     order = (
         db.query(Order)
         .options(selectinload(Order.items))
@@ -1126,7 +1169,9 @@ def get_order(
             detail="Order not found"
         )
 
-    # 🇮🇳 Convert created_at to IST
+    # =====================================================
+    # CONVERT CREATED_AT TO INDIA TIME
+    # =====================================================
     created_at = order.created_at
 
     if created_at:
@@ -1139,6 +1184,65 @@ def get_order(
             ZoneInfo("Asia/Kolkata")
         )
 
+    # =====================================================
+    # BUILD ORDER ITEMS
+    # =====================================================
+    items = []
+
+    for item in order.items:
+        product_id = getattr(item, "product_id", None)
+
+        items.append({
+            "id": (
+                str(item.id)
+                if item.id
+                else None
+            ),
+
+            "name": item.item_name,
+
+            "quantity": item.quantity,
+
+            "price": float(
+                item.price or 0
+            ),
+
+            "image": item.item_image,
+
+            # Normal Menu identification
+            "menu_id": (
+                str(item.menu_id)
+                if item.menu_id
+                else None
+            ),
+
+            # Tomorrow Special identification
+            "special_id": (
+                str(item.special_id)
+                if item.special_id
+                else None
+            ),
+
+            # Explore Product identification
+            "product_id": (
+                str(product_id)
+                if product_id
+                else None
+            ),
+
+            "is_explore_product": (
+                product_id is not None
+            ),
+
+            # Tomorrow Special flag
+            "is_tomorrow_special": (
+                item.special_id is not None
+            ),
+        })
+
+    # =====================================================
+    # ORDER RESPONSE
+    # =====================================================
     return {
         "id": str(order.id),
 
@@ -1168,49 +1272,16 @@ def get_order(
             order.cod_confirmed
         ),
 
-        # Tomorrow Special order identify
+        # Order-level Tomorrow Special flag
         "is_tomorrow_special": any(
             item.special_id is not None
             for item in order.items
         ),
 
-        "items": [
-            {
-                "id": (
-                    str(item.id)
-                    if item.id
-                    else None
-                ),
-
-                "name": item.item_name,
-
-                "quantity": item.quantity,
-
-                "price": float(
-                    item.price or 0
-                ),
-
-                "image": item.item_image,
-
-                "special_id": (
-                    str(item.special_id)
-                    if item.special_id
-                    else None
-                ),
-
-                "menu_id": (
-                    str(item.menu_id)
-                    if item.menu_id
-                    else None
-                ),
-
-                "is_tomorrow_special": (
-                    item.special_id is not None
-                ),
-            }
-            for item in order.items
-        ],
+        # Order items
+        "items": items,
     }
+
 # =========================
 # ✅ CREATE ORDER
 # =========================
@@ -1326,6 +1397,8 @@ async def create_order(
         # =====================================================
         # 🚀 FETCH ALL MENUS IN ONE QUERY
         # =====================================================
+        
+        
 
         menu_ids = [
             item.menu_id
@@ -1350,6 +1423,33 @@ async def create_order(
             menus = {
                 menu.id: menu
                 for menu in menu_list
+            }
+            
+        # =====================================================
+        # 🛍️ FETCH EXPLORE PRODUCTS
+        # =====================================================
+
+        product_ids = [
+            item.product_id
+            for item in data.items
+            if item.product_id
+        ]
+
+        products = {}
+
+        if product_ids:
+            product_list = (
+                db.query(ExploreProduct)
+                .filter(
+                    ExploreProduct.id.in_(product_ids),
+                    ExploreProduct.is_active == True,
+                )
+                .all()
+            )
+
+            products = {
+                product.id: product
+                for product in product_list
             }
 
         # =====================================================
@@ -1403,23 +1503,45 @@ async def create_order(
             # =================================================
             meal_type = None
             target_date = None
+            
+            item_ids = [
+                item.menu_id,
+                item.special_id,
+                item.product_id,
+            ]
 
-            if not item.menu_id and not item.special_id:
+            selected_ids = [
+                value for value in item_ids
+                if value is not None
+            ]
 
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid item"
-                )
-
-            if item.menu_id and item.special_id:
-
+            if len(selected_ids) != 1:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "Item cannot contain both "
-                        "menu_id and special_id"
-                    )
+                        "Exactly one of menu_id, "
+                        "special_id or product_id is required"
+                    ),
                 )
+
+            if item.product_id and data.is_subscription:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Explore Products cannot be ordered as subscription items",
+                )
+
+            if item.product_id and (
+                item.meal_type is not None
+                or item.menu_date is not None
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Explore Products cannot contain meal_type or menu_date",
+                )
+
+            
+            
+
 
             # =================================================
             # 🍽️ NORMAL MENU ITEM
@@ -1774,7 +1896,9 @@ async def create_order(
                         "is_tomorrow_special": False,
                     }
                 )
-
+            
+            
+            
             # =================================================
             # 🍽️ TOMORROW SPECIAL
             # =================================================
@@ -1985,6 +2109,77 @@ async def create_order(
                         "is_tomorrow_special": True,
                     }
                 )
+                
+            # =================================================
+            # 🛍️ EXPLORE PRODUCT
+            # =================================================
+            elif item.product_id:
+
+                product = (
+                    db.query(ExploreProduct)
+                    .filter(
+                        ExploreProduct.id == item.product_id,
+                        ExploreProduct.is_active == True,
+                    )
+                    .with_for_update()
+                    .first()
+                )
+
+                if product is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Explore Product not found or inactive",
+                    )
+
+                if item.quantity <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Quantity must be greater than zero",
+                    )
+
+                if product.quantity is None or product.quantity < item.quantity:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Insufficient product stock",
+                    )
+
+                if chef_id is None:
+                    chef_id = product.chef_id
+                elif chef_id != product.chef_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Different chefs not allowed",
+                    )
+
+                product.quantity -= item.quantity
+
+                price = float(product.price) * item.quantity
+                total_price += price
+
+                order_item = OrderItem(
+                    order_id=order.id,
+                    product_id=product.id,
+                    menu_id=None,
+                    special_id=None,
+                    quantity=item.quantity,
+                    price=price,
+                    item_name=product.name,
+                    item_image=product.image_url,
+                    meal_type=None,
+                    menu_date=None,
+                )
+
+                db.add(order_item)
+
+                created_items.append({
+                    "name": product.name,
+                    "quantity": item.quantity,
+                    "price": price,
+                    "image": product.image_url,
+                    "product_id": str(product.id),
+                    "is_explore_product": True,
+                    "is_tomorrow_special": False,
+                })
 
         # =====================================================
         # ❗ CHEF MUST EXIST
@@ -2130,9 +2325,7 @@ async def create_order(
         # 🧹 CUSTOMER ORDER CACHE
         # =====================================================
 
-        delete_cache(
-            f"orders:v1:user:{user.id}"
-        )
+        delete_cache(f"orders:v2:user:{user.id}")
 
         # =====================================================
         # 🧹 CHEF DASHBOARD CACHE
@@ -2415,7 +2608,7 @@ async def confirm_cod_order(
         # =========================
         db.commit()
         db.refresh(order)
-        delete_cache(f"orders:v1:user:{order.user_id}")
+        delete_cache(f"orders:v2:user:{order.user_id}")
 
         # =========================
         # CLEAR CART
@@ -3108,7 +3301,7 @@ async def verify_payment(
         # =====================================================
 
         delete_cache(
-            f"orders:v1:user:{order.user_id}"
+             f"orders:v2:user:{order.user_id}"
         )
 
         # =====================================================
@@ -3671,6 +3864,41 @@ def update_status(
     # =====================================================
     # 💾 ONE ATOMIC COMMIT
     # =====================================================
+    
+    # =================================================
+    # 🛍️ EXPLORE PRODUCT STOCK RESTORE
+    # =================================================
+    
+    if status == "cancelled" and old_status != "cancelled":
+        # EXPLORE PRODUCT STOCK RESTORE
+        explore_product_items = (
+            db.query(OrderItem)
+            .filter(
+                OrderItem.order_id == order.id,
+                OrderItem.product_id.isnot(None),
+            )
+            .all()
+        )
+    
+        for item in explore_product_items:
+            product = (
+                db.query(ExploreProduct)
+                .filter(
+                    ExploreProduct.id == item.product_id
+                )
+                .with_for_update()
+                .first()
+            )
+    
+            if product:
+                product.quantity = (
+                    int(product.quantity or 0)
+                    + int(item.quantity or 0)
+                )
+    
+    
+    
+    
 
     db.commit()
 
@@ -3683,7 +3911,7 @@ def update_status(
     )
 
     delete_cache(
-        f"orders:v1:user:{order.user_id}"
+         f"orders:v2:user:{order.user_id}"
     )
 
     # =====================================================
@@ -3757,7 +3985,7 @@ def get_today_orders(
         {
             "id": str(order.id),
             "status": order.status,
-            "total_price": order.total_price,
+            "total_price": float(order.total_price or 0),
             "customer_name": order.customer_name,
             "phone": order.phone,
             "address": order.address,
@@ -3772,15 +4000,44 @@ def get_today_orders(
                 {
                     "name": item.item_name,
                     "quantity": item.quantity,
-                    "price": item.price,
+                    "price": float(item.price or 0),
                     "image": item.item_image,
+
+                    # Normal menu ID
+                    "menu_id": (
+                        str(item.menu_id)
+                        if item.menu_id
+                        else None
+                    ),
+
+                    # Tomorrow Special ID
+                    "special_id": (
+                        str(item.special_id)
+                        if item.special_id
+                        else None
+                    ),
+
+                    # Explore Product ID
+                    "product_id": (
+                        str(item.product_id)
+                        if getattr(item, "product_id", None)
+                        else None
+                    ),
+
+                    # Product identification flags
+                    "is_explore_product": (
+                        getattr(item, "product_id", None)
+                        is not None
+                    ),
+                    "is_tomorrow_special": (
+                        item.special_id is not None
+                    ),
                 }
                 for item in order.items
             ],
         }
         for order in orders
     ]
-
 
 # =========================================================
 # CUSTOMER - UPCOMING ORDERS
@@ -3807,7 +4064,7 @@ def get_upcoming_orders(
         {
             "id": str(order.id),
             "status": order.status,
-            "total_price": order.total_price,
+            "total_price": float(order.total_price or 0),
             "customer_name": order.customer_name,
             "phone": order.phone,
             "address": order.address,
@@ -3822,15 +4079,44 @@ def get_upcoming_orders(
                 {
                     "name": item.item_name,
                     "quantity": item.quantity,
-                    "price": item.price,
+                    "price": float(item.price or 0),
                     "image": item.item_image,
+
+                    # Normal menu ID
+                    "menu_id": (
+                        str(item.menu_id)
+                        if item.menu_id
+                        else None
+                    ),
+
+                    # Tomorrow Special ID
+                    "special_id": (
+                        str(item.special_id)
+                        if item.special_id
+                        else None
+                    ),
+
+                    # Explore Product ID
+                    "product_id": (
+                        str(item.product_id)
+                        if getattr(item, "product_id", None)
+                        else None
+                    ),
+
+                    # Item type identification
+                    "is_explore_product": (
+                        getattr(item, "product_id", None)
+                        is not None
+                    ),
+                    "is_tomorrow_special": (
+                        item.special_id is not None
+                    ),
                 }
                 for item in order.items
             ],
         }
         for order in orders
     ]
-
 
 # =========================================================
 # CUSTOMER - PAST ORDERS
@@ -3857,30 +4143,69 @@ def get_past_orders(
         {
             "id": str(order.id),
             "status": order.status,
-            "total_price": order.total_price,
+            "total_price": float(order.total_price or 0),
             "customer_name": order.customer_name,
             "phone": order.phone,
             "address": order.address,
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
+
+            # Refund details
             "refund_status": order.refund_status,
-            "refund_amount": order.refund_amount,
+            "refund_amount": (
+                float(order.refund_amount)
+                if order.refund_amount is not None
+                else None
+            ),
             "refund_date": (
                 order.refund_date.isoformat()
                 if order.refund_date
                 else None
             ),
+
             "created_at": (
                 order.created_at.isoformat()
                 if order.created_at
                 else None
             ),
+
+            # Order items
             "items": [
                 {
                     "name": item.item_name,
                     "quantity": item.quantity,
-                    "price": item.price,
+                    "price": float(item.price or 0),
                     "image": item.item_image,
+
+                    # Normal menu ID
+                    "menu_id": (
+                        str(item.menu_id)
+                        if item.menu_id
+                        else None
+                    ),
+
+                    # Tomorrow Special ID
+                    "special_id": (
+                        str(item.special_id)
+                        if item.special_id
+                        else None
+                    ),
+
+                    # Explore Product ID
+                    "product_id": (
+                        str(item.product_id)
+                        if getattr(item, "product_id", None)
+                        else None
+                    ),
+
+                    # Item type flags
+                    "is_explore_product": (
+                        getattr(item, "product_id", None)
+                        is not None
+                    ),
+                    "is_tomorrow_special": (
+                        item.special_id is not None
+                    ),
                 }
                 for item in order.items
             ],

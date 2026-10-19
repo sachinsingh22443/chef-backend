@@ -1,3 +1,6 @@
+
+import uuid
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -9,16 +12,12 @@ from sqlalchemy import (
 )
 
 from sqlalchemy.dialects.postgresql import UUID
-
 from sqlalchemy.orm import relationship
-
-import uuid
 
 from app.db.base import Base
 
 
 class OrderItem(Base):
-
     __tablename__ = "order_items"
 
     id = Column(
@@ -34,6 +33,10 @@ class OrderItem(Base):
         nullable=False,
     )
 
+    # =====================================================
+    # NORMAL MENU
+    # =====================================================
+
     menu_id = Column(
         UUID(as_uuid=True),
         ForeignKey("menus.id"),
@@ -41,9 +44,24 @@ class OrderItem(Base):
         index=True,
     )
 
+    # =====================================================
+    # TOMORROW SPECIAL
+    # =====================================================
+
     special_id = Column(
         UUID(as_uuid=True),
         ForeignKey("tomorrow_specials.id"),
+        nullable=True,
+        index=True,
+    )
+
+    # =====================================================
+    # EXPLORE PRODUCT
+    # =====================================================
+
+    product_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("explore_products.id"),
         nullable=True,
         index=True,
     )
@@ -57,16 +75,19 @@ class OrderItem(Base):
         nullable=False,
     )
 
+    # Total price for this item, including quantity
     price = Column(
         Float,
         nullable=False,
     )
 
+    # Snapshot of product/menu name at order time
     item_name = Column(
         String,
         index=True,
     )
 
+    # Snapshot of product/menu image at order time
     item_image = Column(
         String,
         nullable=True,
@@ -105,30 +126,29 @@ class OrderItem(Base):
     # =====================================================
 
     __table_args__ = (
-
         Index(
             "idx_orderitem_order_menu",
             "order_id",
             "menu_id",
         ),
-
         Index(
             "idx_orderitem_order_special",
             "order_id",
             "special_id",
         ),
-
+        Index(
+            "idx_orderitem_order_product",
+            "order_id",
+            "product_id",
+        ),
         Index(
             "idx_orderitem_menu_quantity",
             "menu_id",
             "quantity",
         ),
-
         Index(
             "idx_orderitem_meal_date",
             "meal_type",
             "menu_date",
         ),
     )
-    
-    
