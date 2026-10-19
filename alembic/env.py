@@ -22,7 +22,7 @@ if database_url:
 
 # 3. APNE MODELS KO EK DUM SAHI SEQUENCE MEIN CONNECT KAREIN
 from app.db.base import Base
-
+from app.models.explore_product import ExploreProduct
 # Aapke main.py ke exact imports jo error ko fix karenge
 from app.models.refresh_token import RefreshToken
 from app.models import (

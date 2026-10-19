@@ -18,6 +18,7 @@ from app.api.v1.tomorrow_special_preorder import (
 from app.api.v1 import delivery
 # Models
 from app.models.refresh_token import RefreshToken
+from app.models.explore_product import ExploreProduct
 from app.models.delivery_partner import DeliveryPartnerProfile
 from app.models.delivery_batch_pickup import DeliveryBatchPickup
 from app.api.v1.delivery_assignment import router as delivery_assignment_router
@@ -26,6 +27,7 @@ from app.api.v1.delivery_earnings import router as delivery_earnings_router
 from app.api.v1.delivery_profile import (
     router as delivery_profile_router
 )
+from app.api.v1 import explore
 from app.models import fcm_device_token
 from app.models import (
     user,
@@ -152,6 +154,7 @@ app.include_router(
 app.include_router(
     delivery_profile_router
 )
+app.include_router(explore.router)
 # ==========================
 # Health Check
 # ==========================
