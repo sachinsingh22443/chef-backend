@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
-
+from app.models.explore_product import ExploreProduct
 from app.api.deps import get_db, get_current_user
 from app.models.menu import Menu
 from app.models.cart import Cart, CartItem
@@ -198,6 +198,7 @@ def get_cart(
             "item_id": str(
                 item.menu_id
                 or item.special_id
+                or item.product_id
             ),
 
             # =================================================
@@ -217,9 +218,9 @@ def get_cart(
             # =================================================
 
             "type": (
-                "menu"
-                if item.menu_id
-                else "special"
+                "menu" if item.menu_id
+                else "special" if item.special_id
+                else "product"
             ),
 
             # =================================================
@@ -261,6 +262,12 @@ def get_cart(
             "special_id": (
                 str(item.special_id)
                 if item.special_id
+                else None
+            ),
+            
+            "product_id": (
+                str(item.product_id)
+                if item.product_id
                 else None
             ),
         })
@@ -741,6 +748,76 @@ def add_to_cart(
             )
 
             db.add(item)
+            
+    
+    # =====================================================
+    # EXPLORE PRODUCT - NO CUTOFF RESTRICTION
+    # =====================================================
+    elif data.type == "product":
+
+        product = (
+            db.query(ExploreProduct)
+            .filter(
+                ExploreProduct.id == data.item_id,
+                ExploreProduct.is_active == True,
+            )
+            .first()
+        )
+
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found or unavailable",
+            )
+
+        if product.quantity is not None:
+            if product.quantity <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Product is out of stock",
+                )
+
+        item = (
+            db.query(CartItem)
+            .filter(
+                CartItem.cart_id == cart.id,
+                CartItem.product_id == product.id,
+            )
+            .first()
+        )
+
+        new_quantity = data.quantity
+
+        if item:
+            new_quantity += item.quantity
+
+        if (
+            product.quantity is not None
+            and new_quantity > product.quantity
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {product.quantity} items available",
+            )
+
+        if item:
+            item.quantity = new_quantity
+            item.name = product.name
+            item.price = product.price
+            item.image = product.image_url or ""
+            item.food_type = product.category
+        else:
+            item = CartItem(
+                cart_id=cart.id,
+                product_id=product.id,
+                quantity=data.quantity,
+                name=product.name,
+                price=product.price,
+                image=product.image_url or "",
+                food_type=product.category,
+            )
+            db.add(item)
+
 
     # =====================================================
     # INVALID TYPE
@@ -1179,6 +1256,49 @@ def update_cart(
         item.menu_date = target_date
 
         item.meal_type = meal_type
+        
+    
+    # =====================================================
+    # EXPLORE PRODUCT - NO CUTOFF RESTRICTION
+    # =====================================================
+    elif type == "product":
+
+        if not item.product_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid product cart item",
+            )
+
+        product = (
+            db.query(ExploreProduct)
+            .filter(
+                ExploreProduct.id == item.product_id,
+                ExploreProduct.is_active == True,
+            )
+            .first()
+        )
+
+        if not product:
+            raise HTTPException(
+                status_code=404,
+                detail="Product not found or unavailable",
+            )
+
+        if (
+            product.quantity is not None
+            and quantity > product.quantity
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {product.quantity} items available",
+            )
+
+        item.quantity = quantity
+        item.name = product.name
+        item.price = product.price
+        item.image = product.image_url or ""
+        item.food_type = product.category
+
 
     # =====================================================
     # INVALID TYPE
@@ -1251,6 +1371,7 @@ def remove_item(
     if type not in {
         "menu",
         "special",
+        "product",
     }:
 
         raise HTTPException(
@@ -1281,6 +1402,7 @@ def remove_item(
     # =====================================================
     # TYPE SAFETY
     # =====================================================
+    
 
     if type == "menu" and not item.menu_id:
 
@@ -1294,6 +1416,12 @@ def remove_item(
         raise HTTPException(
             status_code=400,
             detail="Invalid special cart item",
+        )
+        
+    if type == "product" and not item.product_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid product cart item",
         )
 
     # =====================================================

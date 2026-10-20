@@ -67,6 +67,12 @@ class CartItem(Base):
             "idx_cartitem_meal_type",
             "meal_type",
         ),
+        
+        Index(
+            "idx_cartitem_cart_product",
+            "cart_id",
+            "product_id",
+        ),
     )
 
     id = Column(
@@ -92,6 +98,13 @@ class CartItem(Base):
     special_id = Column(
         UUID(as_uuid=True),
         ForeignKey("tomorrow_specials.id"),
+        nullable=True,
+        index=True,
+    )
+    
+    product_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("explore_products.id"),
         nullable=True,
         index=True,
     )
